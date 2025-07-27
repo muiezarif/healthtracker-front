@@ -10,8 +10,9 @@ import SignUp from '@/views/SignUp';
 import PatientSymptomTracker from '@/views/PatientSymptomTracker';
 import { motion } from 'framer-motion';
 import ManageUsers from '@/views/admin/ManageUsers';
-import SystemSettings from '@/views/admin/SystemSettings';
 import AddUser from '@/views/admin/AddUser';
+import SystemSettings from '@/views/admin/SystemSettings';
+import CreatePatient from './views/provider/CreatePatient';
 
 const RoleBasedRedirect = () => {
   const { user, loading } = useAuth();
@@ -28,11 +29,11 @@ const RoleBasedRedirect = () => {
       </div>
     );
   }
-  
+
   if (user?.role === 'provider') {
     return <Navigate to="/provider" replace />;
   }
-  
+
   if (user?.role === 'admin') {
     return <Navigate to="/admin" replace />;
   }
@@ -60,7 +61,7 @@ const PrivateRoute = ({ allowedRoles }) => {
   if (!token || !user) {
     return <Navigate to="/login" replace />;
   }
-  
+
   if (allowedRoles && !allowedRoles.includes(user.role)) {
     return <Navigate to="/" replace />;
   }
@@ -92,6 +93,10 @@ function App() {
           <Route path="/admin/users" element={<ManageUsers />} />
           <Route path="/admin/users/add" element={<AddUser />} />
           <Route path="/admin/settings" element={<SystemSettings />} />
+        </Route>
+
+        <Route element={<PrivateRoute allowedRoles={['provider']} />}>
+          <Route path="/provider/create-patient" element={<CreatePatient />} />
         </Route>
       </Routes>
     </Router>

@@ -63,12 +63,12 @@ const ProviderHeader = ({ activeTab, setActiveTab }) => {
           <NavItem icon={Building} label="Educational Resources" tabName="educationalResources" /> */}
         </nav>
         <div className="flex items-center gap-4">
-          {/* <Button asChild variant="ghost" className="flex items-center gap-2 text-slate-300 hover:text-white">
-            <Link to="/patient">
+          <Button asChild variant="ghost" className="flex items-center gap-2 text-slate-300 hover:text-white hover:bg-white/10">
+            <Link to="/provider/create-patient">
               <Users className="w-5 h-5" />
-              <span className="hidden sm:inline">Patient View</span>
+              <span className="hidden sm:inline">Create Patient</span>
             </Link>
-          </Button> */}
+          </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" size="icon" className="text-slate-300 hover:text-white">
