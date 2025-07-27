@@ -10,6 +10,7 @@ import { Label } from '@/components/ui/label';
 import { useToast } from '@/components/ui/use-toast';
 import { ArrowLeft, UserPlus, Loader2, Stethoscope } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
+import healthtrackerapi from '../../lib/healthtrackerapi';
 
 const CreatePatient = () => {
   const { toast } = useToast();
@@ -22,8 +23,8 @@ const CreatePatient = () => {
     phone_number: '',
     address: '',
     age: '',
-    gender: '',
-    medical_history: '',
+    sex: '',
+    password:''
   });
 
   const handleInputChange = (e) => {
@@ -44,23 +45,30 @@ const CreatePatient = () => {
     setLoading(true);
 
     // TODO: Implement API call to create patient
-    // This is where you would call your API to create the patient
-    try {
-      // Simulate API call
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
+
+      await healthtrackerapi.post('provider/patients', {
+        ...formData,
+        role: 'patient',
+      }, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      }).then((res) => {
       toast({
         title: 'Patient Created Successfully!',
         description: `${formData.name} has been added to your patient list.`,
       });
       navigate('/provider');
-    } catch (error) {
-      toast({
+      }).catch((error) => {
+        toast({
         variant: 'destructive',
         title: 'Error creating patient',
         description: 'Please try again later.',
       });
-    }
+      })
+      
+      
+
 
     setLoading(false);
   };
@@ -119,6 +127,10 @@ const CreatePatient = () => {
                     <Label htmlFor="address">Address</Label>
                     <Input id="address" value={formData.address} onChange={handleInputChange} placeholder="123 Main St, City, State 12345" />
                   </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="password">Password</Label>
+                    <Input id="password" value={formData.password} onChange={handleInputChange} placeholder="Password" />
+                  </div>
 
                   <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                     <div className="space-y-2">
@@ -126,14 +138,9 @@ const CreatePatient = () => {
                       <Input id="age" type="number" value={formData.age} onChange={handleInputChange} placeholder="25" min="0" max="150" />
                     </div>
                     <div className="space-y-2">
-                      <Label htmlFor="gender">Gender</Label>
-                      <Input id="gender" value={formData.gender} onChange={handleInputChange} placeholder="Male/Female/Other" />
+                      <Label htmlFor="sex">Gender</Label>
+                      <Input id="sex" value={formData.sex} onChange={handleInputChange} placeholder="Male/Female/Other" />
                     </div>
-                  </div>
-
-                  <div className="space-y-2">
-                    <Label htmlFor="medical_history">Medical History</Label>
-                    <Input id="medical_history" value={formData.medical_history} onChange={handleInputChange} placeholder="Any relevant medical history..." />
                   </div>
                   
                   <div className="flex justify-end pt-4">
