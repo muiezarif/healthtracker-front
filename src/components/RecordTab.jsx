@@ -38,7 +38,33 @@ const getSeverityColor = (severity) => {
   return 'text-red-400';
 };
 
-// ---------- Voice Agent ----------
+// Basic NLP-ish categorizer (frontend) — infers type from symptom text/description
+const inferTypeFromText = (textRaw) => {
+  const text = String(textRaw || '').toLowerCase();
+  const physical = ['pain','ache','fever','cough','nausea','vomit','dizziness','rash','injury','cramp','chest','breath','breathing','headache','throat','stomach','diarrhea','fatigue','swelling','back','arm','leg','ear','nose','flu','cold'];
+  const mental = ['focus','memory','concentrat','insomnia','sleep','adhd','brain fog','confus','hallucin','delusion','cognitive'];
+  const emotional = ['anxiety','anxious','depress','sad','mood','anger','irritab','stress','panic','fear','lonely'];
+
+  const hit = (arr) => arr.some(k => text.includes(k));
+  if (hit(emotional)) return 'emotional';
+  if (hit(mental)) return 'mental';
+  if (hit(physical)) return 'physical';
+  return 'physical'; // sensible default for UI
+};
+
+const wordsToSeverity = (val) => {
+  if (typeof val === 'number' && !Number.isNaN(val)) {
+    return Math.min(10, Math.max(1, val));
+  }
+  const s = String(val || '').toLowerCase();
+  const digitFirst = s.match(/\b(10|[1-9])\b/);
+  if (digitFirst) return Math.min(10, Math.max(1, Number(digitFirst[1])));
+  const words = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
+  for (const w in words) { if (new RegExp(`\\b${w}\\b`).test(s)) return words[w]; }
+  return 5;
+};
+
+// Enhanced Voice Agent Component with OpenAI Realtime API
 const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -50,59 +76,35 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
   const peerConnection = useRef(null);
   const audioElement = useRef(null);
+  const micStreamRef = useRef(null);
   const { toast } = useToast();
 
-  // Capture the five answers in order
+  // stepIndex mapping:
+  // 0: symptom (short)
+  // 1: severity (1-10)
+  // 2: description
+  // 3: additional_notes
   const [stepIndex, setStepIndex] = useState(0);
   const [answers, setAnswers] = useState({
-    symptom_type: '',     // physical | mental | emotional
-    symptom: '',          // short name e.g., "headache"
-    severity_level: 5,    // 1..10
-    description: '',      // details
-    additional_notes: ''  // extras
+    symptom_type: '',
+    symptom: '',
+    severity_level: 0,
+    description: '',
+    additional_notes: ''
   });
 
-  // --- Normalizers (be generous with real-world phrasing) ---
-  const normalizeSymptomType = (text) => {
-    const v = String(text || '').toLowerCase().replace(/[.!,?]/g, ' ').trim();
-    if (/(phys|body|bodily|physical)/.test(v)) return 'physical';
-    if (/(ment|psych|anxiety|stress|mental)/.test(v)) return 'mental';
-    if (/(emo|mood|feelings|emotional)/.test(v)) return 'emotional';
-    // default fallback: return what we have (UI will still show it)
-    return v || '';
-  };
+  // Local rate-limit guard (cooldown) after 429
+  const [rateLimitedUntil, setRateLimitedUntil] = useState(0);
+  const RATE_LIMIT_COOLDOWN_MS = 15000; // 15s pause on 429
 
-  const toSeverityNumber = (val) => {
-    if (typeof val === 'number' && !Number.isNaN(val)) {
-      return Math.min(10, Math.max(1, val));
-    }
-    const s = String(val || '').toLowerCase();
-
-    // 7/10, 8 out of 10, rate is 6, etc.
-    const digitFirst = s.match(/\b(10|[1-9])\b/);
-    if (digitFirst) return Math.min(10, Math.max(1, Number(digitFirst[1])));
-
-    // spelled numbers
-    const words = {
-      one:1, two:2, three:3, four:4, five:5,
-      six:6, seven:7, eight:8, nine:9, ten:10
-    };
-    for (const w in words) {
-      if (new RegExp(`\\b${w}\\b`).test(s)) {
-        return words[w];
-      }
-    }
-    return 5; // safe default
-  };
+  // NOTE: console warning to help diagnose the extension error
+  useEffect(() => {
+    console.warn('[VoiceAgent] If you see "A listener indicated an asynchronous response..." in console, it is usually from a browser extension. Try Incognito to rule it out.');
+  }, []);
 
   useEffect(() => {
-    if (isOpen) {
-      // Initialize audio element
-      audioElement.current = document.createElement('audio');
-      audioElement.current.autoplay = true;
-    }
     return () => { stopSession(); };
-  }, [isOpen]);
+  }, []);
 
   const startSession = async () => {
     try {
@@ -110,7 +112,6 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       setError('');
       setIsSessionActive(false);
 
-      // Reset capture state at the beginning of every session
       setStepIndex(0);
       setAnswers({
         symptom_type: '',
@@ -120,13 +121,11 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
         additional_notes: ''
       });
       setEvents([]);
+      setRateLimitedUntil(0);
 
-      // Get ephemeral token from your backend
-      const tokenResponse = await healthtrackerapi.get('/token'); // axios instance call
+      const tokenResponse = await healthtrackerapi.get('/token');
       if (tokenResponse.status !== 200) {
-        throw new Error(
-          `Token request failed: ${tokenResponse.status} - ${tokenResponse.statusText || 'Bad response'}`
-        );
+        throw new Error(`Token request failed: ${tokenResponse.status} - ${tokenResponse.statusText || 'Bad response'}`);
       }
       const data = tokenResponse.data;
       if (!data?.client_secret?.value) {
@@ -135,18 +134,24 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       }
       const EPHEMERAL_KEY = data.client_secret.value;
 
-      // Create peer connection
-      const pc = new RTCPeerConnection();
+      const pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
       peerConnection.current = pc;
 
-      // Play remote audio from the AI
+      // Receive audio from the agent
+      pc.addTransceiver('audio', { direction: 'sendrecv' });
+
       pc.ontrack = (e) => {
         if (audioElement.current) {
           audioElement.current.srcObject = e.streams[0];
+          audioElement.current.muted = false;
+          audioElement.current.playsInline = true;
+          audioElement.current.play().catch(() => {});
         }
       };
 
-      // Add local audio track (microphone)
+      // Microphone
       const ms = await navigator.mediaDevices.getUserMedia({
         audio: {
           sampleRate: 16000,
@@ -156,24 +161,33 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
           autoGainControl: true
         }
       });
-      pc.addTrack(ms.getTracks()[0]);
+      micStreamRef.current = ms;
+      const micTrack = ms.getTracks()[0];
+      const sender = pc.addTrack(micTrack);
 
-      // Data channel for events
-      const dc = pc.createDataChannel('oai-events');
+      // Use Opus DTX if available to reduce upstream chatter
+      try {
+        const params = sender.getParameters();
+        if (!params.encodings) params.encodings = [{}];
+        params.encodings = params.encodings.map(enc => ({ ...enc, dtx: true }));
+        await sender.setParameters(params);
+      } catch {}
+
+      // Data channel
+      const dc = pc.createDataChannel("oai-events");
       setDataChannel(dc);
 
-      // Offer/answer
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const baseUrl = 'https://api.openai.com/v1/realtime';
-      const model = 'gpt-4o-realtime-preview-2024-12-17';
+      const baseUrl = "https://api.openai.com/v1/realtime";
+      const model = "gpt-4o-realtime-preview-2024-12-17";
       const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
-        method: 'POST',
+        method: "POST",
         body: offer.sdp,
         headers: {
           Authorization: `Bearer ${EPHEMERAL_KEY}`,
-          'Content-Type': 'application/sdp',
+          "Content-Type": "application/sdp",
         },
       });
 
@@ -182,21 +196,15 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
         throw new Error(`SDP exchange failed: ${sdpResponse.status} - ${errorText}`);
       }
 
-      const answer = { type: 'answer', sdp: await sdpResponse.text() };
+      const answer = { type: "answer", sdp: await sdpResponse.text() };
       await pc.setRemoteDescription(answer);
 
-      toast({
-        title: '🤖 AI Assistant Connected',
-        description: 'Voice session started. You can now speak with the AI.',
-      });
+      // First user gesture already happened (Start click) so play() should succeed
+      toast({ title: "🤖 AI Assistant Connected", description: "Voice session started. You can now speak with the AI." });
     } catch (err) {
       console.error('Session start error:', err);
       setError(`Failed to start session: ${err.message}`);
-      toast({
-        variant: 'destructive',
-        title: 'Connection Failed',
-        description: err.message,
-      });
+      toast({ variant: "destructive", title: "Connection Failed", description: err.message });
     } finally {
       setIsConnecting(false);
     }
@@ -213,11 +221,23 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       } catch {}
       peerConnection.current = null;
     }
+    if (micStreamRef.current) {
+      try { micStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      micStreamRef.current = null;
+    }
     setIsSessionActive(false);
     setDataChannel(null);
   };
 
   const sendClientEvent = (message) => {
+    // If rate-limited, ignore outgoing prompts for a short cooldown
+    const now = Date.now();
+    if (now < rateLimitedUntil) {
+      const secs = Math.ceil((rateLimitedUntil - now) / 1000);
+      console.warn(`Rate limited. Waiting ${secs}s before sending events.`);
+      return;
+    }
+
     if (dataChannel && dataChannel.readyState === 'open') {
       const timestamp = new Date().toLocaleTimeString();
       message.event_id = message.event_id || crypto.randomUUID();
@@ -225,24 +245,24 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       if (!message.timestamp) message.timestamp = timestamp;
       setEvents((prev) => [message, ...prev]);
     } else {
-      console.error('Failed to send message - data channel not ready', message);
+      console.error("Failed to send message - data channel not ready", message);
     }
   };
 
   const sendTextMessage = (message) => {
     const event = {
-      type: 'conversation.item.create',
+      type: "conversation.item.create",
       item: {
-        type: 'message',
-        role: 'user',
-        content: [{ type: 'input_text', text: message }],
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: message }],
       },
     };
     sendClientEvent(event);
-    sendClientEvent({ type: 'response.create' });
+    sendClientEvent({ type: "response.create" });
   };
 
-  // Data channel listeners
+  // Set up data channel event listeners
   useEffect(() => {
     if (!dataChannel) return;
 
@@ -253,38 +273,70 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
         switch (event.type) {
           case 'conversation.item.created': {
-            if (event.item?.role === 'assistant' && event.item?.content) {
+            if (event.item && event.item.role === 'assistant' && event.item.content) {
               const content = event.item.content[0];
-              if (content?.text) setCurrentMessage(content.text);
+              if (content && content.text) {
+                setCurrentMessage(content.text);
+              }
             }
             break;
           }
 
           case 'conversation.item.input_audio_transcription.completed': {
-            // User speech → transcript
+            // User's speech transcription
             const saidRaw = event.transcript || '';
             const said = String(saidRaw).trim();
 
-            setAnswers((prev) => {
+            setAnswers(prev => {
               const next = { ...prev };
-              if (stepIndex === 0) next.symptom_type = normalizeSymptomType(said);
-              else if (stepIndex === 1) next.symptom = said;
-              else if (stepIndex === 2) next.severity_level = toSeverityNumber(said);
-              else if (stepIndex === 3) next.description = said;
-              else if (stepIndex === 4) next.additional_notes = said;
 
-              // LIVE UPDATE the parent form so users see fields fill in immediately:
-              onSymptomExtracted(next); // ← remove this line if you only want final submit to populate
+              if (stepIndex === 0) {
+                // symptom name first; infer type from what they said
+                next.symptom = said;
+                const inferred = inferTypeFromText(said);
+                next.symptom_type = inferred;
+              } else if (stepIndex === 1) {
+                next.severity_level = wordsToSeverity(said);
+              } else if (stepIndex === 2) {
+                next.description = said;
+                // enrich inference using description too
+                const inferred = inferTypeFromText(`${next.symptom} ${said}`);
+                next.symptom_type = inferred || next.symptom_type;
+              } else if (stepIndex === 3) {
+                next.additional_notes = said;
+              }
 
+              // Live update parent so the UI reflects each answer
+              onSymptomExtracted(next);
               return next;
             });
 
-            setStepIndex((i) => Math.min(i + 1, 4));
+            setStepIndex(i => Math.min(i + 1, 3));
+            break;
+          }
+
+          // IMPORTANT: handle STT failures (429 Too Many Requests etc.)
+          case 'conversation.item.input_audio_transcription.failed': {
+            const msg = event.error?.message || 'Audio transcription failed';
+            setError(msg);
+
+            // If we detect 429, back off for a bit
+            if (/429/.test(msg)) {
+              const until = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+              setRateLimitedUntil(until);
+              toast({
+                variant: 'destructive',
+                title: 'Speech-to-text rate limited',
+                description: `Too many requests. Pausing mic for ${Math.ceil(RATE_LIMIT_COOLDOWN_MS/1000)}s…`
+              });
+            } else {
+              toast({ variant: 'destructive', title: 'Transcription failed', description: msg });
+            }
             break;
           }
 
           case 'response.done':
-            // AI finished a turn
+            // AI finished responding
             break;
 
           case 'error':
@@ -312,25 +364,25 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       setError('Communication error occurred');
     };
 
-    dataChannel.addEventListener('message', onMessage);
-    dataChannel.addEventListener('open', onOpen);
-    dataChannel.addEventListener('close', onClose);
-    dataChannel.addEventListener('error', onError);
+    dataChannel.addEventListener("message", onMessage);
+    dataChannel.addEventListener("open", onOpen);
+    dataChannel.addEventListener("close", onClose);
+    dataChannel.addEventListener("error", onError);
 
     return () => {
-      dataChannel.removeEventListener('message', onMessage);
-      dataChannel.removeEventListener('open', onOpen);
-      dataChannel.removeEventListener('close', onClose);
-      dataChannel.removeEventListener('error', onError);
+      dataChannel.removeEventListener("message", onMessage);
+      dataChannel.removeEventListener("open", onOpen);
+      dataChannel.removeEventListener("close", onClose);
+      dataChannel.removeEventListener("error", onError);
     };
-  }, [dataChannel, stepIndex, onSymptomExtracted]);
+  }, [dataChannel, stepIndex, onSymptomExtracted, rateLimitedUntil, toast]);
 
   const handleSessionComplete = () => {
     setSessionComplete(true);
     onSymptomExtracted(answers);
     toast({
-      title: '✅ Session Complete!',
-      description: 'Your symptoms have been recorded successfully.'
+      title: "✅ Session Complete!",
+      description: "Your symptoms have been recorded successfully."
     });
   };
 
@@ -354,6 +406,9 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
         exit={{ scale: 0.9, opacity: 0 }}
         className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl border border-white/20 p-6 max-w-lg w-full max-h-[85vh] overflow-hidden"
       >
+        {/* Real audio element in DOM so autoplay isn't blocked */}
+        <audio ref={audioElement} className="hidden" />
+
         <div className="flex items-center justify-between mb-6">
           <div className="flex items-center gap-3">
             <div className="p-2 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full">
@@ -434,11 +489,9 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
             {/* Status Indicators */}
             <div className="flex items-center justify-center gap-4">
-              <div
-                className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
-                  isSessionActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
-                }`}
-              >
+              <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
+                isSessionActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+              }`}>
                 {isSessionActive ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                 {isSessionActive ? 'Voice Active' : 'Voice Inactive'}
               </div>
@@ -502,17 +555,14 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   );
 };
 
-// ---------- Record Tab ----------
 const RecordTab = ({ addSymptom }) => {
   const { toast } = useToast();
-
-  // This state backs the visible form controls
   const [newSymptom, setNewSymptom] = useState({
-    type: 'physical',   // physical | mental | emotional
-    symptom: '',        // short name (e.g., "headache")
-    description: '',    // details
-    severity: 5,        // 1..10
-    notes: ''           // extras
+    type: 'physical',
+    symptom: '',
+    description: '',
+    severity: 5,
+    notes: ''
   });
   const [isRecording, setIsRecording] = useState(false);
   const [showVoiceAgent, setShowVoiceAgent] = useState(false);
@@ -525,8 +575,8 @@ const RecordTab = ({ addSymptom }) => {
 
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
       toast({
-        variant: 'destructive',
-        title: 'Voice recording not supported',
+        variant: "destructive",
+        title: "Voice recording not supported",
         description: "Your browser doesn't support this feature. Please use the AI Assistant instead."
       });
       return;
@@ -541,33 +591,42 @@ const RecordTab = ({ addSymptom }) => {
 
     recognition.onstart = () => {
       setIsRecording(true);
-      toast({ title: '🎤 Listening...', description: 'Speak your symptoms clearly.' });
+      toast({
+        title: "🎤 Listening...",
+        description: "Speak your symptoms clearly."
+      });
     };
 
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
-      setNewSymptom((prev) => ({ ...prev, description: transcript }));
-      toast({ title: '✅ Voice recorded!', description: 'Your symptoms have been captured.' });
+      setNewSymptom(prev => ({ ...prev, description: transcript }));
+      toast({
+        title: "✅ Voice recorded!",
+        description: "Your symptoms have been captured."
+      });
     };
 
     recognition.onerror = (event) => {
       toast({
-        variant: 'destructive',
-        title: '❌ Recording failed',
-        description: event.error === 'not-allowed' ? 'Microphone access denied.' : 'Please try again or use the AI Assistant.'
+        variant: "destructive",
+        title: "❌ Recording failed",
+        description: event.error === 'not-allowed' ? "Microphone access denied." : "Please try again or use the AI Assistant."
       });
     };
 
-    recognition.onend = () => { setIsRecording(false); };
+    recognition.onend = () => {
+      setIsRecording(false);
+    };
+
     recognition.start();
   };
 
   const handleAddSymptom = () => {
     if (!newSymptom.description.trim() && !newSymptom.symptom.trim()) {
       toast({
-        variant: 'destructive',
-        title: '⚠️ Missing information',
-        description: 'Please provide at least a symptom name or a description.'
+        variant: "destructive",
+        title: "⚠️ Missing information",
+        description: "Please provide at least a symptom name or a description."
       });
       return;
     }
@@ -587,47 +646,25 @@ const RecordTab = ({ addSymptom }) => {
       notes: ''
     });
 
-    toast({ title: '✅ Symptom recorded!', description: 'Your health data has been saved.' });
+    toast({
+      title: "✅ Symptom recorded!",
+      description: "Your health data has been saved."
+    });
   };
 
   // Map AI answers (schema-shaped) → visible form fields
-  const mapFromAI = (a) => {
-    // normalize type to our 3 values
-    const normalizeType = (t) => {
-      const v = String(t || '').toLowerCase();
-      if (v.includes('phys')) return 'physical';
-      if (v.includes('ment')) return 'mental';
-      if (v.includes('emo')) return 'emotional';
-      return v || 'physical';
-    };
-
-    const toNum = (v) => {
-      if (typeof v === 'number') return Math.min(10, Math.max(1, v));
-      const s = String(v || '');
-      const m = s.match(/\b(10|[1-9])\b/);
-      if (m) return Math.min(10, Math.max(1, Number(m[1])));
-      const words = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
-      const lower = s.toLowerCase();
-      for (const w in words) if (lower.includes(w)) return words[w];
-      return 5;
-    };
-
-    setNewSymptom((prev) => ({
+  const handleSymptomExtracted = (a) => {
+    setNewSymptom(prev => ({
       ...prev,
-      type: a?.symptom_type ? normalizeType(a.symptom_type) : prev.type,
+      type: a?.symptom_type ? a.symptom_type : prev.type,
       symptom: a?.symptom ?? prev.symptom,
       description:
         a?.description ||
         [a?.symptom, a?.additional_notes].filter(Boolean).join(' — ') ||
         prev.description,
-      severity: a?.severity_level != null ? toNum(a.severity_level) : prev.severity,
+      severity: a?.severity_level != null ? wordsToSeverity(a.severity_level) : prev.severity,
       notes: a?.additional_notes ?? prev.notes
     }));
-  };
-
-  const handleSymptomExtracted = (a) => {
-    mapFromAI(a);
-    // do not toast on every live update; the VoiceAgent will toast on completion
   };
 
   return (
@@ -675,12 +712,11 @@ const RecordTab = ({ addSymptom }) => {
                   <Button
                     key={type}
                     variant={newSymptom.type === type ? 'default' : 'outline'}
-                    onClick={() => setNewSymptom((prev) => ({ ...prev, type }))}
-                    className={`p-4 h-auto flex-col gap-2 transition-all ${
-                      newSymptom.type === type
+                    onClick={() => setNewSymptom(prev => ({ ...prev, type }))}
+                    className={`p-4 h-auto flex-col gap-2 transition-all ${newSymptom.type === type
                         ? `bg-gradient-to-r ${getSymptomColor(type)} text-white shadow-lg`
                         : 'bg-white/5 border-white/20 text-gray-300 hover:bg-white/10'
-                    }`}
+                      }`}
                   >
                     <Icon className="w-6 h-6" />
                     <span className="font-medium">{label}</span>
@@ -695,7 +731,7 @@ const RecordTab = ({ addSymptom }) => {
               <input
                 type="text"
                 value={newSymptom.symptom}
-                onChange={(e) => setNewSymptom((prev) => ({ ...prev, symptom: e.target.value }))}
+                onChange={(e) => setNewSymptom(prev => ({ ...prev, symptom: e.target.value }))}
                 placeholder="e.g., Headache, Nausea, Chest pain"
                 className="w-full px-3 py-2 rounded-md bg-white/5 border border-white/20 text-white placeholder:text-gray-400 outline-none"
               />
@@ -706,9 +742,7 @@ const RecordTab = ({ addSymptom }) => {
               <Label className="text-white font-medium">Description</Label>
               <Textarea
                 value={newSymptom.description}
-                onChange={(e) =>
-                  setNewSymptom((prev) => ({ ...prev, description: e.target.value }))
-                }
+                onChange={(e) => setNewSymptom(prev => ({ ...prev, description: e.target.value }))}
                 placeholder="Describe your symptoms in detail..."
                 className="bg-white/5 border-white/20 text-white placeholder:text-gray-400 min-h-[100px]"
               />
@@ -727,9 +761,7 @@ const RecordTab = ({ addSymptom }) => {
                 min="1"
                 max="10"
                 value={newSymptom.severity}
-                onChange={(e) =>
-                  setNewSymptom((prev) => ({ ...prev, severity: parseInt(e.target.value, 10) }))
-                }
+                onChange={(e) => setNewSymptom(prev => ({ ...prev, severity: parseInt(e.target.value, 10) }))}
                 className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer slider"
               />
               <div className="flex justify-between text-sm text-gray-400">
@@ -744,7 +776,7 @@ const RecordTab = ({ addSymptom }) => {
               <Label className="text-white font-medium">Additional Notes (Optional)</Label>
               <Textarea
                 value={newSymptom.notes}
-                onChange={(e) => setNewSymptom((prev) => ({ ...prev, notes: e.target.value }))}
+                onChange={(e) => setNewSymptom(prev => ({ ...prev, notes: e.target.value }))}
                 placeholder="Any additional context, triggers, or observations..."
                 className="bg-white/5 border-white/20 text-white placeholder:text-gray-400"
               />
