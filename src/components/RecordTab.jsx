@@ -19,10 +19,11 @@ import {
   Activity,
   CheckCircle,
   Loader2,
+  Bug
 } from 'lucide-react';
 import healthtrackerapi from '../lib/healthtrackerapi';
 
-// Utility functions
+/** ---------------- UI helpers ---------------- */
 const getSymptomColor = (type) => {
   const colors = {
     physical: 'from-red-500 to-orange-500',
@@ -38,7 +39,7 @@ const getSeverityColor = (severity) => {
   return 'text-red-400';
 };
 
-// Basic NLP-ish categorizer (frontend) — infers type from symptom text/description
+/** ---------------- NLP-ish helpers ---------------- */
 const inferTypeFromText = (textRaw) => {
   const text = String(textRaw || '').toLowerCase();
   const physical = ['pain','ache','fever','cough','nausea','vomit','dizziness','rash','injury','cramp','chest','breath','breathing','headache','throat','stomach','diarrhea','fatigue','swelling','back','arm','leg','ear','nose','flu','cold'];
@@ -52,19 +53,52 @@ const inferTypeFromText = (textRaw) => {
   return 'physical'; // sensible default for UI
 };
 
-const wordsToSeverity = (val) => {
-  if (typeof val === 'number' && !Number.isNaN(val)) {
-    return Math.min(10, Math.max(1, val));
-  }
-  const s = String(val || '').toLowerCase();
-  const digitFirst = s.match(/\b(10|[1-9])\b/);
-  if (digitFirst) return Math.min(10, Math.max(1, Number(digitFirst[1])));
-  const words = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
-  for (const w in words) { if (new RegExp(`\\b${w}\\b`).test(s)) return words[w]; }
-  return 5;
+const bandWordToNumber = (s) => {
+  const t = String(s || '').toLowerCase();
+  if (/\bmild\b/.test(t)) return 2;      // 1–3
+  if (/\bmoderate\b/.test(t)) return 5;  // 4–6
+  if (/\bsevere\b/.test(t)) return 8;    // 7–8
+  if (/\bworst\b/.test(t)) return 10;    // 9–10
+  return null;
 };
 
-// Enhanced Voice Agent Component with OpenAI Realtime API
+const clamp1to10 = (n) => Math.min(10, Math.max(1, n));
+
+/**
+ * Robust “words to severity”:
+ * - digits: 10, 8, 7, “10/10”, “8 out of 10”
+ * - words: one..ten
+ * - band words: mild/moderate/severe/worst
+ */
+const wordsToSeverity = (val) => {
+  if (typeof val === 'number' && !Number.isNaN(val)) return clamp1to10(val);
+  const s = String(val || '').toLowerCase().trim();
+
+  // quick band keywords
+  const bandGuess = bandWordToNumber(s);
+  if (bandGuess != null) return bandGuess;
+
+  // explicit “x/10” first
+  const frac = s.match(/\b(10|[1-9])\s*\/\s*10\b/);
+  if (frac) return clamp1to10(Number(frac[1]));
+
+  // “x out of 10”
+  const outOf = s.match(/\b(10|[1-9])\s*(?:out\s+of|over)\s*10\b/);
+  if (outOf) return clamp1to10(Number(outOf[1]));
+
+  // standalone digit
+  const digit = s.match(/\b(10|[1-9])\b/);
+  if (digit) return clamp1to10(Number(digit[1]));
+
+  // words
+  const words = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
+  for (const w in words) { if (new RegExp(`\\b${w}\\b`).test(s)) return clamp1to10(words[w]); }
+
+  // nothing matched -> undefined (let caller decide whether to keep prior)
+  return undefined;
+};
+
+/** ---------------- Voice Agent ---------------- */
 const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
@@ -74,37 +108,35 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   const [events, setEvents] = useState([]);
   const [dataChannel, setDataChannel] = useState(null);
 
+  // Debug panel state
+  const [lastTranscript, setLastTranscript] = useState('');
+  const [parsedSeverity, setParsedSeverity] = useState(null);
+  const [lastStepIndex, setLastStepIndex] = useState(0);
+
   const peerConnection = useRef(null);
   const audioElement = useRef(null);
   const micStreamRef = useRef(null);
   const { toast } = useToast();
 
-  // stepIndex mapping:
-  // 0: symptom (short)
-  // 1: severity (1-10)
-  // 2: description
-  // 3: additional_notes
+  // 0: symptom, 1: severity, 2: description, 3: additional_notes
   const [stepIndex, setStepIndex] = useState(0);
   const [answers, setAnswers] = useState({
     symptom_type: '',
     symptom: '',
-    severity_level: 0,
+    severity_level: 5,   // start with 5 for UI; we won't overwrite it unless we successfully parse severity
     description: '',
     additional_notes: ''
   });
 
   // Local rate-limit guard (cooldown) after 429
   const [rateLimitedUntil, setRateLimitedUntil] = useState(0);
-  const RATE_LIMIT_COOLDOWN_MS = 15000; // 15s pause on 429
-
-  // NOTE: console warning to help diagnose the extension error
-  useEffect(() => {
-    console.warn('[VoiceAgent] If you see "A listener indicated an asynchronous response..." in console, it is usually from a browser extension. Try Incognito to rule it out.');
-  }, []);
+  const RATE_LIMIT_COOLDOWN_MS = 15000;
 
   useEffect(() => {
-    return () => { stopSession(); };
+    console.warn('[VoiceAgent] If you see "A listener indicated an asynchronous response..." it is most likely a browser extension. Try Incognito.');
   }, []);
+
+  useEffect(() => () => { stopSession(); }, []);
 
   const startSession = async () => {
     try {
@@ -122,8 +154,15 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       });
       setEvents([]);
       setRateLimitedUntil(0);
+      setLastTranscript('');
+      setParsedSeverity(null);
+      setLastStepIndex(0);
 
+      console.groupCollapsed('[VoiceAgent] startSession');
+      console.log('Fetching ephemeral key...');
       const tokenResponse = await healthtrackerapi.get('/token');
+      console.log('Token response status:', tokenResponse.status);
+
       if (tokenResponse.status !== 200) {
         throw new Error(`Token request failed: ${tokenResponse.status} - ${tokenResponse.statusText || 'Bad response'}`);
       }
@@ -134,15 +173,14 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       }
       const EPHEMERAL_KEY = data.client_secret.value;
 
-      const pc = new RTCPeerConnection({
-        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
-      });
+      console.log('Creating RTCPeerConnection...');
+      const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
       peerConnection.current = pc;
 
-      // Receive audio from the agent
+      // Receive audio from agent
       pc.addTransceiver('audio', { direction: 'sendrecv' });
-
       pc.ontrack = (e) => {
+        console.log('[VoiceAgent] ontrack (assistant audio stream received)');
         if (audioElement.current) {
           audioElement.current.srcObject = e.streams[0];
           audioElement.current.muted = false;
@@ -152,56 +190,57 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       };
 
       // Microphone
+      console.log('Requesting user media (mic)...');
       const ms = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          sampleRate: 16000,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true
-        }
+        audio: { sampleRate: 16000, channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
       });
       micStreamRef.current = ms;
       const micTrack = ms.getTracks()[0];
       const sender = pc.addTrack(micTrack);
 
-      // Use Opus DTX if available to reduce upstream chatter
+      // Opus DTX
       try {
         const params = sender.getParameters();
         if (!params.encodings) params.encodings = [{}];
         params.encodings = params.encodings.map(enc => ({ ...enc, dtx: true }));
         await sender.setParameters(params);
-      } catch {}
+        console.log('Enabled Opus DTX on mic sender.');
+      } catch (e) {
+        console.warn('Could not enable Opus DTX:', e);
+      }
 
       // Data channel
       const dc = pc.createDataChannel("oai-events");
       setDataChannel(dc);
+      console.log('DataChannel created.');
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      console.log('Local SDP created.');
 
       const baseUrl = "https://api.openai.com/v1/realtime";
       const model = "gpt-4o-realtime-preview-2024-12-17";
+      console.log('Posting SDP to Realtime API...');
       const sdpResponse = await fetch(`${baseUrl}?model=${model}`, {
         method: "POST",
         body: offer.sdp,
-        headers: {
-          Authorization: `Bearer ${EPHEMERAL_KEY}`,
-          "Content-Type": "application/sdp",
-        },
+        headers: { Authorization: `Bearer ${EPHEMERAL_KEY}`, "Content-Type": "application/sdp" },
       });
 
       if (!sdpResponse.ok) {
         const errorText = await sdpResponse.text();
+        console.error('SDP exchange failed payload:', errorText);
         throw new Error(`SDP exchange failed: ${sdpResponse.status} - ${errorText}`);
       }
 
       const answer = { type: "answer", sdp: await sdpResponse.text() };
       await pc.setRemoteDescription(answer);
+      console.log('Remote SDP set. WebRTC session established.');
+      console.groupEnd();
 
-      // First user gesture already happened (Start click) so play() should succeed
       toast({ title: "🤖 AI Assistant Connected", description: "Voice session started. You can now speak with the AI." });
     } catch (err) {
+      console.groupEnd();
       console.error('Session start error:', err);
       setError(`Failed to start session: ${err.message}`);
       toast({ variant: "destructive", title: "Connection Failed", description: err.message });
@@ -211,12 +250,11 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   };
 
   const stopSession = () => {
+    console.groupCollapsed('[VoiceAgent] stopSession');
     if (dataChannel) { try { dataChannel.close(); } catch {} }
     if (peerConnection.current) {
       try {
-        peerConnection.current.getSenders().forEach((sender) => {
-          try { sender.track && sender.track.stop(); } catch {}
-        });
+        peerConnection.current.getSenders().forEach((sender) => { try { sender.track && sender.track.stop(); } catch {} });
         peerConnection.current.close();
       } catch {}
       peerConnection.current = null;
@@ -227,42 +265,39 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
     }
     setIsSessionActive(false);
     setDataChannel(null);
+    console.groupEnd();
   };
 
   const sendClientEvent = (message) => {
-    // If rate-limited, ignore outgoing prompts for a short cooldown
     const now = Date.now();
     if (now < rateLimitedUntil) {
       const secs = Math.ceil((rateLimitedUntil - now) / 1000);
-      console.warn(`Rate limited. Waiting ${secs}s before sending events.`);
+      console.warn(`[VoiceAgent] Rate limited. Waiting ${secs}s before sending events.`);
       return;
     }
 
     if (dataChannel && dataChannel.readyState === 'open') {
       const timestamp = new Date().toLocaleTimeString();
       message.event_id = message.event_id || crypto.randomUUID();
+      console.log('[VoiceAgent -> OAI]', message);
       dataChannel.send(JSON.stringify(message));
       if (!message.timestamp) message.timestamp = timestamp;
       setEvents((prev) => [message, ...prev]);
     } else {
-      console.error("Failed to send message - data channel not ready", message);
+      console.error("[VoiceAgent] Failed to send message - data channel not ready", message);
     }
   };
 
   const sendTextMessage = (message) => {
     const event = {
       type: "conversation.item.create",
-      item: {
-        type: "message",
-        role: "user",
-        content: [{ type: "input_text", text: message }],
-      },
+      item: { type: "message", role: "user", content: [{ type: "input_text", text: message }] },
     };
     sendClientEvent(event);
     sendClientEvent({ type: "response.create" });
   };
 
-  // Set up data channel event listeners
+  // Data channel listeners
   useEffect(() => {
     if (!dataChannel) return;
 
@@ -270,6 +305,11 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       try {
         const event = JSON.parse(e.data);
         if (!event.timestamp) event.timestamp = new Date().toLocaleTimeString();
+
+        // Log EVERYTHING in a readable group
+        console.groupCollapsed(`[OAI -> VoiceAgent] ${event.type}`);
+        console.log('raw event:', event);
+        console.groupEnd();
 
         switch (event.type) {
           case 'conversation.item.created': {
@@ -283,44 +323,60 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
           }
 
           case 'conversation.item.input_audio_transcription.completed': {
-            // User's speech transcription
-            const saidRaw = event.transcript || '';
+            const saidRaw = event.transcript ?? '';
             const said = String(saidRaw).trim();
+            setLastTranscript(said);
+            setLastStepIndex(stepIndex);
 
             setAnswers(prev => {
               const next = { ...prev };
 
               if (stepIndex === 0) {
-                // symptom name first; infer type from what they said
                 next.symptom = said;
                 const inferred = inferTypeFromText(said);
                 next.symptom_type = inferred;
+                console.log('[Parse] Step 0 symptom:', said, '→ type:', inferred);
               } else if (stepIndex === 1) {
-                next.severity_level = wordsToSeverity(said);
+                // Parse severity with robust helper
+                // Only apply if we actually parsed a number/band
+                const parsed = wordsToSeverity(said);
+                setParsedSeverity(parsed ?? null);
+
+                if (typeof parsed === 'number' && !Number.isNaN(parsed)) {
+                  next.severity_level = parsed;
+                  console.log('[Parse] Step 1 severity transcript:', said, '→ parsed:', parsed);
+                } else {
+                  console.warn('[Parse] Step 1 severity NOT parsed, keeping previous value:', prev.severity_level);
+                }
               } else if (stepIndex === 2) {
                 next.description = said;
-                // enrich inference using description too
                 const inferred = inferTypeFromText(`${next.symptom} ${said}`);
                 next.symptom_type = inferred || next.symptom_type;
+                console.log('[Parse] Step 2 description set. Refined type:', next.symptom_type);
               } else if (stepIndex === 3) {
                 next.additional_notes = said;
+                console.log('[Parse] Step 3 notes set.');
               }
 
-              // Live update parent so the UI reflects each answer
+              // Tell parent immediately
               onSymptomExtracted(next);
               return next;
             });
 
-            setStepIndex(i => Math.min(i + 1, 3));
+            // Move to next step
+            setStepIndex(i => {
+              const ni = Math.min(i + 1, 3);
+              console.log('[Flow] stepIndex:', i, '→', ni);
+              return ni;
+            });
             break;
           }
 
-          // IMPORTANT: handle STT failures (429 Too Many Requests etc.)
           case 'conversation.item.input_audio_transcription.failed': {
             const msg = event.error?.message || 'Audio transcription failed';
+            console.error('[STT failed]', msg);
             setError(msg);
 
-            // If we detect 429, back off for a bit
             if (/429/.test(msg)) {
               const until = Date.now() + RATE_LIMIT_COOLDOWN_MS;
               setRateLimitedUntil(until);
@@ -336,21 +392,26 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
           }
 
           case 'response.done':
-            // AI finished responding
+            // AI finished responding (useful hook if needed)
             break;
 
           case 'error':
+            console.error('[Realtime error]', event.error);
             setError(event.error?.message || 'Realtime error');
             break;
         }
 
         setEvents((prev) => [event, ...prev]);
+        // expose last events for quick inspection
+        window.__voiceAgentEvents = (window.__voiceAgentEvents || []);
+        window.__voiceAgentEvents.unshift(event);
       } catch (err) {
         console.error('Error parsing data channel message:', err);
       }
     };
 
     const onOpen = () => {
+      console.log('[VoiceAgent] DataChannel open');
       setIsSessionActive(true);
       setEvents([]);
       setTimeout(() => {
@@ -358,9 +419,12 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
       }, 600);
     };
 
-    const onClose = () => setIsSessionActive(false);
+    const onClose = () => {
+      console.log('[VoiceAgent] DataChannel closed');
+      setIsSessionActive(false);
+    };
     const onError = (err) => {
-      console.error('Data channel error:', err);
+      console.error('[VoiceAgent] DataChannel error:', err);
       setError('Communication error occurred');
     };
 
@@ -378,35 +442,21 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   }, [dataChannel, stepIndex, onSymptomExtracted, rateLimitedUntil, toast]);
 
   const handleSessionComplete = () => {
+    console.log('[VoiceAgent] Session marked complete. Final answers:', answers);
     setSessionComplete(true);
     onSymptomExtracted(answers);
-    toast({
-      title: "✅ Session Complete!",
-      description: "Your symptoms have been recorded successfully."
-    });
+    toast({ title: "✅ Session Complete!", description: "Your symptoms have been recorded successfully." });
   };
 
-  const handleClose = () => {
-    stopSession();
-    onClose();
-  };
+  const handleClose = () => { stopSession(); onClose(); };
 
   if (!isOpen) return null;
 
   return (
-    <motion.div
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      exit={{ opacity: 0 }}
-      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4"
-    >
-      <motion.div
-        initial={{ scale: 0.9, opacity: 0 }}
-        animate={{ scale: 1, opacity: 1 }}
-        exit={{ scale: 0.9, opacity: 0 }}
-        className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl border border-white/20 p-6 max-w-lg w-full max-h-[85vh] overflow-hidden"
-      >
-        {/* Real audio element in DOM so autoplay isn't blocked */}
+    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+      className="fixed inset-0 bg-black/50 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+      <motion.div initial={{ scale: 0.9, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} exit={{ scale: 0.9, opacity: 0 }}
+        className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl border border-white/20 p-6 max-w-lg w-full max-h-[85vh] overflow-hidden">
         <audio ref={audioElement} className="hidden" />
 
         <div className="flex items-center justify-between mb-6">
@@ -433,12 +483,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               </p>
             </div>
           </div>
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={handleClose}
-            className="text-gray-400 hover:text-white"
-          >
+          <Button variant="ghost" size="sm" onClick={handleClose} className="text-gray-400 hover:text-white">
             <X className="w-5 h-5" />
           </Button>
         </div>
@@ -451,16 +496,13 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               <p className="text-gray-300">Your symptoms have been recorded and processed.</p>
             </div>
 
-            <Button
-              onClick={handleClose}
-              className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600"
-            >
+            <Button onClick={handleClose}
+              className="w-full bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600">
               Continue to Record Form
             </Button>
           </div>
         ) : (
           <div className="space-y-4">
-            {/* Current AI Message */}
             {currentMessage && (
               <div className="bg-black/20 rounded-lg p-4">
                 <div className="flex items-start gap-3">
@@ -473,7 +515,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               </div>
             )}
 
-            {/* Recent Events */}
+            {/* Recent (verbose) events list (trimmed to 3) */}
             {events.length > 0 && (
               <div className="bg-black/20 rounded-lg p-4 max-h-40 overflow-y-auto">
                 <h4 className="text-sm font-medium text-gray-300 mb-2">Recent Activity:</h4>
@@ -487,7 +529,22 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               </div>
             )}
 
-            {/* Status Indicators */}
+            {/* Small inline debug panel */}
+            <div className="bg-black/20 rounded-lg p-3 border border-white/10">
+              <div className="flex items-center gap-2 text-gray-300 text-xs">
+                <Bug className="w-4 h-4" />
+                <span className="font-semibold">Debug</span>
+                <span className="ml-2">stepIndex: <span className="font-mono">{lastStepIndex}</span></span>
+                <span className="ml-3">parsedSeverity: <span className="font-mono">{parsedSeverity ?? '—'}</span></span>
+              </div>
+              {!!lastTranscript && (
+                <div className="mt-1 text-[11px] text-gray-400">
+                  lastTranscript: <span className="font-mono">{lastTranscript}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Status */}
             <div className="flex items-center justify-center gap-4">
               <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
                 isSessionActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
@@ -497,41 +554,23 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               </div>
             </div>
 
-            {/* Control Buttons */}
+            {/* Controls */}
             <div className="space-y-3">
               {!isSessionActive ? (
-                <Button
-                  onClick={startSession}
-                  disabled={isConnecting}
-                  className="w-full p-4 text-lg font-semibold bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:opacity-50"
-                >
-                  {isConnecting ? (
-                    <>
-                      <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                      Connecting...
-                    </>
-                  ) : (
-                    <>
-                      <Phone className="w-5 h-5 mr-2" />
-                      Start Voice Session
-                    </>
-                  )}
+                <Button onClick={startSession} disabled={isConnecting}
+                  className="w-full p-4 text-lg font-semibold bg-gradient-to-r from-green-500 to-emerald-500 hover:from-green-600 hover:to-emerald-600 disabled:opacity-50">
+                  {isConnecting ? (<><Loader2 className="w-5 h-5 mr-2 animate-spin" />Connecting...</>) : (<><Phone className="w-5 h-5 mr-2" />Start Voice Session</>)}
                 </Button>
               ) : (
                 <div className="space-y-2">
-                  <Button
-                    onClick={stopSession}
-                    className="w-full p-4 text-lg font-semibold bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600"
-                  >
+                  <Button onClick={stopSession}
+                    className="w-full p-4 text-lg font-semibold bg-gradient-to-r from-red-500 to-pink-500 hover:from-red-600 hover:to-pink-600">
                     <PhoneOff className="w-5 h-5 mr-2" />
                     End Session
                   </Button>
 
-                  <Button
-                    onClick={handleSessionComplete}
-                    variant="outline"
-                    className="w-full border-green-500/50 text-green-400 hover:bg-green-500/10"
-                  >
+                  <Button onClick={handleSessionComplete} variant="outline"
+                    className="w-full border-green-500/50 text-green-400 hover:bg-green-500/10">
                     <CheckCircle className="w-5 h-5 mr-2" />
                     Complete Recording
                   </Button>
@@ -555,6 +594,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   );
 };
 
+/** ---------------- Record Tab (form) ---------------- */
 const RecordTab = ({ addSymptom }) => {
   const { toast } = useToast();
   const [newSymptom, setNewSymptom] = useState({
@@ -567,11 +607,18 @@ const RecordTab = ({ addSymptom }) => {
   const [isRecording, setIsRecording] = useState(false);
   const [showVoiceAgent, setShowVoiceAgent] = useState(false);
 
+  // Band mapping helpers
+  const bandFromNumber = (n) => (n <= 3 ? 'mild' : n <= 6 ? 'moderate' : n <= 8 ? 'severe' : 'worst');
+  const repValueForBand = (band) => ({ mild: 2, moderate: 5, severe: 8, worst: 10 }[band] ?? 5);
+  const severityBands = [
+    { key: 'mild', label: 'Mild', range: '1–3' },
+    { key: 'moderate', label: 'Moderate', range: '4–6' },
+    { key: 'severe', label: 'Severe', range: '7–8' },
+    { key: 'worst', label: 'Worst', range: '9–10' },
+  ];
+
   const handleVoiceRecording = () => {
-    if (isRecording) {
-      setIsRecording(false);
-      return;
-    }
+    if (isRecording) { setIsRecording(false); return; }
 
     if (!('webkitSpeechRecognition' in window) && !('SpeechRecognition' in window)) {
       toast({
@@ -584,26 +631,17 @@ const RecordTab = ({ addSymptom }) => {
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const recognition = new SpeechRecognition();
-
-    recognition.continuous = false;
-    recognition.interimResults = false;
-    recognition.lang = 'en-US';
+    recognition.continuous = false; recognition.interimResults = false; recognition.lang = 'en-US';
 
     recognition.onstart = () => {
       setIsRecording(true);
-      toast({
-        title: "🎤 Listening...",
-        description: "Speak your symptoms clearly."
-      });
+      toast({ title: "🎤 Listening...", description: "Speak your symptoms clearly." });
     };
 
     recognition.onresult = (event) => {
       const transcript = event.results[0][0].transcript;
       setNewSymptom(prev => ({ ...prev, description: transcript }));
-      toast({
-        title: "✅ Voice recorded!",
-        description: "Your symptoms have been captured."
-      });
+      toast({ title: "✅ Voice recorded!", description: "Your symptoms have been captured." });
     };
 
     recognition.onerror = (event) => {
@@ -614,20 +652,13 @@ const RecordTab = ({ addSymptom }) => {
       });
     };
 
-    recognition.onend = () => {
-      setIsRecording(false);
-    };
-
+    recognition.onend = () => setIsRecording(false);
     recognition.start();
   };
 
   const handleAddSymptom = () => {
     if (!newSymptom.description.trim() && !newSymptom.symptom.trim()) {
-      toast({
-        variant: "destructive",
-        title: "⚠️ Missing information",
-        description: "Please provide at least a symptom name or a description."
-      });
+      toast({ variant: "destructive", title: "⚠️ Missing information", description: "Please provide at least a symptom name or a description." });
       return;
     }
 
@@ -638,22 +669,20 @@ const RecordTab = ({ addSymptom }) => {
       date: new Date().toLocaleDateString()
     });
 
-    setNewSymptom({
-      type: 'physical',
-      symptom: '',
-      description: '',
-      severity: 5,
-      notes: ''
-    });
-
-    toast({
-      title: "✅ Symptom recorded!",
-      description: "Your health data has been saved."
-    });
+    setNewSymptom({ type: 'physical', symptom: '', description: '', severity: 5, notes: '' });
+    toast({ title: "✅ Symptom recorded!", description: "Your health data has been saved." });
   };
 
-  // Map AI answers (schema-shaped) → visible form fields
+  // Map AI answers → form fields (with safer severity update)
   const handleSymptomExtracted = (a) => {
+    // try to parse severity only if present; otherwise keep current value
+    const maybeParsedSeverity = a?.severity_level !== undefined ? wordsToSeverity(a.severity_level) : undefined;
+
+    console.groupCollapsed('[RecordTab] handleSymptomExtracted');
+    console.log('incoming:', a);
+    console.log('parsed severity:', maybeParsedSeverity, '(from)', a?.severity_level);
+    console.groupEnd();
+
     setNewSymptom(prev => ({
       ...prev,
       type: a?.symptom_type ? a.symptom_type : prev.type,
@@ -662,20 +691,15 @@ const RecordTab = ({ addSymptom }) => {
         a?.description ||
         [a?.symptom, a?.additional_notes].filter(Boolean).join(' — ') ||
         prev.description,
-      severity: a?.severity_level != null ? wordsToSeverity(a.severity_level) : prev.severity,
+      severity: typeof maybeParsedSeverity === 'number' ? maybeParsedSeverity : prev.severity,
       notes: a?.additional_notes ?? prev.notes
     }));
   };
 
   return (
     <div className="relative">
-      <motion.div
-        key="record"
-        initial={{ opacity: 0, x: 20 }}
-        animate={{ opacity: 1, x: 0 }}
-        exit={{ opacity: 0, x: -20 }}
-        className="max-w-2xl mx-auto"
-      >
+      <motion.div key="record" initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -20 }}
+        className="max-w-2xl mx-auto">
         <Card className="bg-white/5 backdrop-blur-lg border-white/20 p-6 sm:p-8">
           <div className="space-y-6">
             <div className="text-center">
@@ -691,10 +715,8 @@ const RecordTab = ({ addSymptom }) => {
                   <h3 className="text-lg font-semibold text-white">AI Health Assistant</h3>
                   <p className="text-gray-300 text-sm">Get guided symptom recording with real-time voice interaction</p>
                 </div>
-                <Button
-                  onClick={() => setShowVoiceAgent(true)}
-                  className="ml-auto bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600"
-                >
+                <Button onClick={() => setShowVoiceAgent(true)}
+                  className="ml-auto bg-gradient-to-r from-violet-500 to-purple-500 hover:from-violet-600 hover:to-purple-600">
                   Start Session
                 </Button>
               </div>
@@ -713,10 +735,11 @@ const RecordTab = ({ addSymptom }) => {
                     key={type}
                     variant={newSymptom.type === type ? 'default' : 'outline'}
                     onClick={() => setNewSymptom(prev => ({ ...prev, type }))}
-                    className={`p-4 h-auto flex-col gap-2 transition-all ${newSymptom.type === type
+                    className={`p-4 h-auto flex-col gap-2 transition-all ${
+                      newSymptom.type === type
                         ? `bg-gradient-to-r ${getSymptomColor(type)} text-white shadow-lg`
                         : 'bg-white/5 border-white/20 text-gray-300 hover:bg-white/10'
-                      }`}
+                    }`}
                   >
                     <Icon className="w-6 h-6" />
                     <span className="font-medium">{label}</span>
@@ -748,27 +771,44 @@ const RecordTab = ({ addSymptom }) => {
               />
             </div>
 
-            {/* Severity */}
+            {/* Severity (banded chips) */}
             <div className="space-y-3">
               <Label className="text-white font-medium">
-                Severity Level:{' '}
-                <span className={`font-bold ${getSeverityColor(newSymptom.severity)}`}>
+                Severity:
+                <span className={`ml-2 font-bold ${getSeverityColor(newSymptom.severity)}`}>
                   {newSymptom.severity}/10
                 </span>
               </Label>
-              <input
-                type="range"
-                min="1"
-                max="10"
-                value={newSymptom.severity}
-                onChange={(e) => setNewSymptom(prev => ({ ...prev, severity: parseInt(e.target.value, 10) }))}
-                className="w-full h-2 bg-white/20 rounded-lg appearance-none cursor-pointer slider"
-              />
-              <div className="flex justify-between text-sm text-gray-400">
-                <span>Mild</span>
-                <span>Moderate</span>
-                <span>Severe</span>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                {severityBands.map(({ key, label, range }) => {
+                  const active = bandFromNumber(newSymptom.severity) === key;
+                  return (
+                    <Button
+                      key={key}
+                      type="button"
+                      variant={active ? 'default' : 'outline'}
+                      onClick={() =>
+                        setNewSymptom((prev) => ({ ...prev, severity: repValueForBand(key) }))
+                      }
+                      className={
+                        active
+                          ? 'bg-gradient-to-r from-emerald-500 to-teal-500 text-white shadow'
+                          : 'bg-white/5 border-white/20 text-gray-300 hover:bg-white/10'
+                      }
+                    >
+                      <div className="flex flex-col items-center">
+                        <span className="text-sm font-semibold">{label}</span>
+                        <span className="text-[11px] text-gray-300">{range}</span>
+                      </div>
+                    </Button>
+                  );
+                })}
               </div>
+
+              <p className="text-xs text-gray-400">
+                Tip: say “it’s moderate” or “ten out of ten” — the assistant will set it automatically.
+              </p>
             </div>
 
             {/* Notes */}

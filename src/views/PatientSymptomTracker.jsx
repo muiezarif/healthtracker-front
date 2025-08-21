@@ -62,6 +62,7 @@ const PatientSymptomTracker = () => {
 
     const payload = {
       symptom_type: newSymptom.type,
+      symptom:newSymptom.symptom,
       description: newSymptom.description,
       severity_level: newSymptom.severity,
       additional_notes: newSymptom.notes,
