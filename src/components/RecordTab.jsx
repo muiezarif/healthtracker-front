@@ -22,6 +22,7 @@ import {
   Bug
 } from 'lucide-react';
 import healthtrackerapi from '../lib/healthtrackerapi';
+import { useAuth } from '@/contexts/AuthContext';
 
 /** ---------------- UI helpers ---------------- */
 const getSymptomColor = (type) => {
@@ -42,9 +43,9 @@ const getSeverityColor = (severity) => {
 /** ---------------- NLP-ish helpers ---------------- */
 const inferTypeFromText = (textRaw) => {
   const text = String(textRaw || '').toLowerCase();
-  const physical = ['pain','ache','fever','cough','nausea','vomit','dizziness','rash','injury','cramp','chest','breath','breathing','headache','throat','stomach','diarrhea','fatigue','swelling','back','arm','leg','ear','nose','flu','cold'];
-  const mental = ['focus','memory','concentrat','insomnia','sleep','adhd','brain fog','confus','hallucin','delusion','cognitive'];
-  const emotional = ['anxiety','anxious','depress','sad','mood','anger','irritab','stress','panic','fear','lonely'];
+  const physical = ['pain', 'ache', 'fever', 'cough', 'nausea', 'vomit', 'dizziness', 'rash', 'injury', 'cramp', 'chest', 'breath', 'breathing', 'headache', 'throat', 'stomach', 'diarrhea', 'fatigue', 'swelling', 'back', 'arm', 'leg', 'ear', 'nose', 'flu', 'cold'];
+  const mental = ['focus', 'memory', 'concentrat', 'insomnia', 'sleep', 'adhd', 'brain fog', 'confus', 'hallucin', 'delusion', 'cognitive'];
+  const emotional = ['anxiety', 'anxious', 'depress', 'sad', 'mood', 'anger', 'irritab', 'stress', 'panic', 'fear', 'lonely'];
 
   const hit = (arr) => arr.some(k => text.includes(k));
   if (hit(emotional)) return 'emotional';
@@ -91,7 +92,7 @@ const wordsToSeverity = (val) => {
   if (digit) return clamp1to10(Number(digit[1]));
 
   // words
-  const words = { one:1,two:2,three:3,four:4,five:5,six:6,seven:7,eight:8,nine:9,ten:10 };
+  const words = { one: 1, two: 2, three: 3, four: 4, five: 5, six: 6, seven: 7, eight: 8, nine: 9, ten: 10 };
   for (const w in words) { if (new RegExp(`\\b${w}\\b`).test(s)) return clamp1to10(words[w]); }
 
   // nothing matched -> undefined (let caller decide whether to keep prior)
@@ -100,6 +101,9 @@ const wordsToSeverity = (val) => {
 
 /** ---------------- Voice Agent ---------------- */
 const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
+  const { user, token } = useAuth();
+  const startedAtRef = useRef(null);
+
   const [isSessionActive, setIsSessionActive] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
   const [currentMessage, setCurrentMessage] = useState('');
@@ -132,6 +136,64 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
   const [rateLimitedUntil, setRateLimitedUntil] = useState(0);
   const RATE_LIMIT_COOLDOWN_MS = 15000;
 
+const saveConversation = async ({ reason = "complete" } = {}) => {
+  try {
+    const filteredMessages = events
+      .map(ev => {
+        // Patient speech → transcript
+        if (
+          ev.type === "conversation.item.input_audio_transcription.completed" &&
+          ev.transcript
+        ) {
+          return { role: "patient", text: ev.transcript.trim() };
+        }
+
+        // Assistant replies (structured message)
+        if (
+          ev.type === "conversation.item.created" &&
+          ev.item?.role === "assistant" &&
+          ev.item?.content?.[0]?.text
+        ) {
+          return { role: "assistant", text: ev.item.content[0].text.trim() };
+        }
+
+        // Assistant spoken output (audio transcript)
+        if (
+          ev.type === "response.audio_transcript.done" &&
+          ev.transcript
+        ) {
+          return { role: "assistant", text: ev.transcript.trim() };
+        }
+
+        // Patient typed input (role "user")
+        if (
+          ev.type === "conversation.item.create" &&
+          (ev.item?.role === "user" || ev.item?.role === "patient") &&
+          ev.item?.content?.[0]?.text
+        ) {
+          return { role: "patient", text: ev.item.content[0].text.trim() };
+        }
+
+        return null;
+      })
+      .filter(Boolean);
+
+    if (!filteredMessages.length) {
+      console.warn("[Conversation] No text messages to save, skipping");
+      return;
+    }
+
+    const payload = { messages: filteredMessages, reason };
+
+    await healthtrackerapi.post("/conversations", payload, {
+      headers: { Authorization: `Bearer ${token}` }
+    });
+  } catch (err) {
+    console.error("[Conversation] save failed:", err);
+  }
+};
+
+
   useEffect(() => {
     console.warn('[VoiceAgent] If you see "A listener indicated an asynchronous response..." it is most likely a browser extension. Try Incognito.');
   }, []);
@@ -160,7 +222,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
       console.groupCollapsed('[VoiceAgent] startSession');
       console.log('Fetching ephemeral key...');
-      const tokenResponse = await healthtrackerapi.get('/token');
+      const tokenResponse = await healthtrackerapi.get('/voice-agent/symptom-recorder/token');
       console.log('Token response status:', tokenResponse.status);
 
       if (tokenResponse.status !== 200) {
@@ -185,7 +247,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
           audioElement.current.srcObject = e.streams[0];
           audioElement.current.muted = false;
           audioElement.current.playsInline = true;
-          audioElement.current.play().catch(() => {});
+          audioElement.current.play().catch(() => { });
         }
       };
 
@@ -235,6 +297,8 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
       const answer = { type: "answer", sdp: await sdpResponse.text() };
       await pc.setRemoteDescription(answer);
+      startedAtRef.current = new Date().toISOString();
+      console.log("[Conversation] startedAt =", startedAtRef.current);
       console.log('Remote SDP set. WebRTC session established.');
       console.groupEnd();
 
@@ -251,16 +315,16 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
   const stopSession = () => {
     console.groupCollapsed('[VoiceAgent] stopSession');
-    if (dataChannel) { try { dataChannel.close(); } catch {} }
+    if (dataChannel) { try { dataChannel.close(); } catch { } }
     if (peerConnection.current) {
       try {
-        peerConnection.current.getSenders().forEach((sender) => { try { sender.track && sender.track.stop(); } catch {} });
+        peerConnection.current.getSenders().forEach((sender) => { try { sender.track && sender.track.stop(); } catch { } });
         peerConnection.current.close();
-      } catch {}
+      } catch { }
       peerConnection.current = null;
     }
     if (micStreamRef.current) {
-      try { micStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
+      try { micStreamRef.current.getTracks().forEach(t => t.stop()); } catch { }
       micStreamRef.current = null;
     }
     setIsSessionActive(false);
@@ -383,7 +447,7 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
               toast({
                 variant: 'destructive',
                 title: 'Speech-to-text rate limited',
-                description: `Too many requests. Pausing mic for ${Math.ceil(RATE_LIMIT_COOLDOWN_MS/1000)}s…`
+                description: `Too many requests. Pausing mic for ${Math.ceil(RATE_LIMIT_COOLDOWN_MS / 1000)}s…`
               });
             } else {
               toast({ variant: 'destructive', title: 'Transcription failed', description: msg });
@@ -441,14 +505,20 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
     };
   }, [dataChannel, stepIndex, onSymptomExtracted, rateLimitedUntil, toast]);
 
-  const handleSessionComplete = () => {
+  const handleSessionComplete = async () => {
     console.log('[VoiceAgent] Session marked complete. Final answers:', answers);
     setSessionComplete(true);
     onSymptomExtracted(answers);
-    toast({ title: "✅ Session Complete!", description: "Your symptoms have been recorded successfully." });
+    await saveConversation({ reason: "complete" });
+    toast({ title: "✅ Session Complete!", description: "Your conversation has been saved." });
   };
 
-  const handleClose = () => { stopSession(); onClose(); };
+  const handleClose = async () => {
+    await saveConversation({ reason: "cancelled" }); // no-op if events is empty
+
+    stopSession();
+    onClose();
+  };
 
   if (!isOpen) return null;
 
@@ -546,9 +616,8 @@ const VoiceAgent = ({ isOpen, onClose, onSymptomExtracted }) => {
 
             {/* Status */}
             <div className="flex items-center justify-center gap-4">
-              <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${
-                isSessionActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
-              }`}>
+              <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm ${isSessionActive ? 'bg-green-500/20 text-green-400' : 'bg-gray-500/20 text-gray-400'
+                }`}>
                 {isSessionActive ? <Mic className="w-4 h-4" /> : <MicOff className="w-4 h-4" />}
                 {isSessionActive ? 'Voice Active' : 'Voice Inactive'}
               </div>
@@ -735,11 +804,10 @@ const RecordTab = ({ addSymptom }) => {
                     key={type}
                     variant={newSymptom.type === type ? 'default' : 'outline'}
                     onClick={() => setNewSymptom(prev => ({ ...prev, type }))}
-                    className={`p-4 h-auto flex-col gap-2 transition-all ${
-                      newSymptom.type === type
-                        ? `bg-gradient-to-r ${getSymptomColor(type)} text-white shadow-lg`
-                        : 'bg-white/5 border-white/20 text-gray-300 hover:bg-white/10'
-                    }`}
+                    className={`p-4 h-auto flex-col gap-2 transition-all ${newSymptom.type === type
+                      ? `bg-gradient-to-r ${getSymptomColor(type)} text-white shadow-lg`
+                      : 'bg-white/5 border-white/20 text-gray-300 hover:bg-white/10'
+                      }`}
                   >
                     <Icon className="w-6 h-6" />
                     <span className="font-medium">{label}</span>
