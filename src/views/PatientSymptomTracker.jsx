@@ -13,6 +13,7 @@ import RecordTab from '@/components/RecordTab';
 import HistoryTab from '@/components/HistoryTab';
 import ProvidersTab from '@/components/ProvidersTab';
 import InsightsTab from '@/components/InsightsTab';
+import AssistantTab from '../components/AssistantTab';
 
 const PatientSymptomTracker = () => {
   const { user, token } = useAuth();
@@ -62,7 +63,7 @@ const PatientSymptomTracker = () => {
 
     const payload = {
       symptom_type: newSymptom.type,
-      symptom:newSymptom.symptom,
+      symptom: newSymptom.symptom,
       description: newSymptom.description,
       severity_level: newSymptom.severity,
       additional_notes: newSymptom.notes,
@@ -81,6 +82,8 @@ const PatientSymptomTracker = () => {
     switch (activeTab) {
       case 'record':
         return <RecordTab addSymptom={addSymptom} />;
+      case 'assistant':
+        return <AssistantTab addSymptom={addSymptom} />;
       case 'history':
         return <HistoryTab symptoms={symptoms} />;
       case 'providers':

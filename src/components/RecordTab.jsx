@@ -534,7 +534,7 @@ const saveConversation = async ({ reason = "complete" } = {}) => {
             <div className="p-2 bg-gradient-to-r from-blue-500 to-purple-500 rounded-full">
               <Bot className="w-6 h-6 text-white" />
             </div>
-            <div>
+            {/* <div>
               <h3 className="text-xl font-bold text-white">AI Health Assistant</h3>
               <p className="text-sm text-gray-400">
                 {isSessionActive ? (
@@ -551,7 +551,7 @@ const saveConversation = async ({ reason = "complete" } = {}) => {
                   'Ready to Connect'
                 )}
               </p>
-            </div>
+            </div> */}
           </div>
           <Button variant="ghost" size="sm" onClick={handleClose} className="text-gray-400 hover:text-white">
             <X className="w-5 h-5" />
@@ -777,7 +777,7 @@ const RecordTab = ({ addSymptom }) => {
             </div>
 
             {/* AI Assistant Banner */}
-            <div className="bg-gradient-to-r from-violet-500/20 to-purple-500/20 border border-violet-500/30 rounded-lg p-4">
+            {/* <div className="bg-gradient-to-r from-violet-500/20 to-purple-500/20 border border-violet-500/30 rounded-lg p-4">
               <div className="flex items-center gap-3">
                 <Bot className="w-8 h-8 text-violet-400" />
                 <div>
@@ -789,7 +789,7 @@ const RecordTab = ({ addSymptom }) => {
                   Start Session
                 </Button>
               </div>
-            </div>
+            </div> */}
 
             {/* Symptom Type */}
             <div className="space-y-3">

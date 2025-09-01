@@ -41,25 +41,25 @@ const PatientDashboard = () => {
       title: "Health Records", 
       description: "Access your medical history.", 
       icon: FileText, 
-      link: "#", 
+      link: "/patient/health-records", 
       color: "text-blue-500",
-      action: showToast
+      action: null
     },
     { 
       title: "My Providers", 
       description: "Manage your connected providers.", 
       icon: Stethoscope, 
-      link: "#", 
+      link: "/patient/providers", 
       color: "text-green-500",
-      action: showToast
+      action: null
     },
     { 
       title: "Profile Settings", 
       description: "Update your personal information.", 
       icon: User, 
-      link: "#", 
+      link: "/patient/profile", 
       color: "text-purple-500",
-      action: showToast
+      action: null
     },
   ];
 

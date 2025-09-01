@@ -13,6 +13,9 @@ import ManageUsers from '@/views/admin/ManageUsers';
 import AddUser from '@/views/admin/AddUser';
 import SystemSettings from '@/views/admin/SystemSettings';
 import CreatePatient from './views/provider/CreatePatient';
+import PatientHealthRecord from './views/PatientHealthRecords';
+import PatientProfile from './views/PatientProfile';
+import PatientProvider from './views/PatientProviders';
 
 const RoleBasedRedirect = () => {
   const { user, loading } = useAuth();
@@ -82,6 +85,9 @@ function App() {
         <Route element={<PrivateRoute allowedRoles={['patient', 'provider', 'admin']} />}>
           <Route path="/patient" element={<PatientDashboard />} />
           <Route path="/patient/tracker" element={<PatientSymptomTracker />} />
+          <Route path="/patient/health-records" element={<PatientHealthRecord />} />
+          <Route path="/patient/profile" element={<PatientProfile />} />
+          <Route path="/patient/providers" element={<PatientProvider />} />
         </Route>
 
         <Route element={<PrivateRoute allowedRoles={['provider', 'admin']} />}>

@@ -9,6 +9,7 @@ import {
 
 const navItems = [
   { id: 'record', label: 'Record', icon: Plus },
+  { id: 'assistant', label: 'Assistant', icon: Plus },
   { id: 'history', label: 'History', icon: FileText },
   { id: 'providers', label: 'Providers', icon: Users },
   { id: 'insights', label: 'Insights', icon: TrendingUp },

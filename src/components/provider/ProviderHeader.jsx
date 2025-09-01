@@ -59,6 +59,7 @@ const ProviderHeader = ({ activeTab, setActiveTab }) => {
         <nav className="hidden md:flex items-center gap-2">
           <NavItem icon={FlaskConical} label="Results" tabName="results" />
           <NavItem icon={UserCog} label="Manage Patients" tabName="managePatients" />
+          <NavItem icon={UserCog} label="Patient Requests" tabName="linkRequests" />
           {/* <NavItem icon={BookOpen} label="Order Kits" tabName="orderKits" />
           <NavItem icon={Building} label="Educational Resources" tabName="educationalResources" /> */}
         </nav>

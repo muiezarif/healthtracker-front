@@ -5,6 +5,7 @@ import PatientList from '@/components/provider/PatientList';
 import PatientDetails from '@/components/provider/PatientDetails';
 import OrderKitsTab from '@/components/provider/OrderKitsTab';
 import EducationalResourcesTab from '@/components/provider/EducationalResourcesTab';
+import ManageLinkRequestsTab from '@/components/provider/ManageLinkRequestsTab';
 import ManagePatientsTab from '@/components/provider/ManagePatientsTab';
 import { AnimatePresence, motion } from 'framer-motion';
 import { useAuth } from '@/contexts/AuthContext';
@@ -124,6 +125,8 @@ const ProviderPortal = () => {
         );
       case 'managePatients':
         return <ManagePatientsTab patients={patients} refreshData={fetchPatients} />;
+      case 'linkRequests':
+        return <ManageLinkRequestsTab />;
       case 'orderKits':
         return <OrderKitsTab />;
       case 'educationalResources':

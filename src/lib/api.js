@@ -179,3 +179,37 @@ export const patientGenerateReport = async (token) => {
   });
   return handleResponse(response);
 };
+
+// === Provider: Link Requests ===
+
+export async function providerGetLinkRequests(token) {
+  const res = await fetch(`${API_URL}/provider/link-requests`, {
+    headers: getAuthHeaders(token),
+    credentials: "include",
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || data?.message || "Failed to fetch link requests");
+  return data;
+}
+
+export async function providerAcceptLinkRequest(token, requestId) {
+  const res = await fetch(`${API_URL}/provider/link-requests/${requestId}/accept`, {
+    method: "POST",
+    headers: getAuthHeaders(token),
+    credentials: "include",
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || data?.message || "Failed to accept link request");
+  return data;
+}
+
+export async function providerRejectLinkRequest(token, requestId) {
+  const res = await fetch(`${API_URL}/provider/link-requests/${requestId}/reject`, {
+    method: "POST",
+    headers: getAuthHeaders(token),
+    credentials: "include",
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data?.error || data?.message || "Failed to reject link request");
+  return data;
+}
