@@ -202,6 +202,15 @@ const PatientSymptomTracker = () => {
             </button>
             <button
               role="tab"
+              aria-selected={activeTab === 'assistant'}
+              onClick={() => setActiveTab('assistant')}
+              className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'record' ? 'text-emerald-400' : 'text-gray-300'}`}
+            >
+              <Stethoscope className="w-5 h-5 mb-1" />
+              Assistant
+            </button>
+            <button
+              role="tab"
               aria-selected={activeTab === 'history'}
               onClick={() => setActiveTab('history')}
               className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'history' ? 'text-emerald-400' : 'text-gray-300'}`}
