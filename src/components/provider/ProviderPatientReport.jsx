@@ -33,7 +33,7 @@ export default function ProviderPatientReport({ patientId, onClose }) {
 
   const cleanupAnalyser = () => {
     if (rafRef.current) cancelAnimationFrame(rafRef.current);
-    rafRef.current = null;
+    rafRef.current = null; // ✅ mutate .current, do not reassign the ref
     try { audioCtxRef.current?.close(); } catch {}
     audioCtxRef.current = null;
     analyserRef.current = null;
@@ -44,46 +44,30 @@ export default function ProviderPatientReport({ patientId, onClose }) {
   const stopSession = async () => {
     try { dataChannel?.close(); } catch {}
     setDataChannel(null);
+
     if (peerConnection.current) {
       try {
-        peerConnection.current.getSenders().forEach(s => { try { s.track && s.track.stop(); } catch {} });
+        peerConnection.current.getSenders().forEach(s => {
+          try { s.track && s.track.stop(); } catch {}
+        });
         peerConnection.current.close();
       } catch {}
       peerConnection.current = null;
     }
+
     if (micStreamRef.current) {
       try { micStreamRef.current.getTracks().forEach(t => t.stop()); } catch {}
       micStreamRef.current = null;
     }
+
     cleanupAnalyser();
     setIsSessionActive(false);
     setSessionComplete(true);
   };
 
-  // IMPORTANT: accept a channel param; fall back to state
-  const primeContext = async (channel) => {
-    const ch = channel || dataChannel;
-    if (!ch || ch.readyState !== "open") return;
-
-    // 1) fetch patient data window (default 7 days)
-    const reportRes = await healthtrackerapi.get(`/voice-agent/provider-report/patient-data`, {
-      params: { patientId, windowDays: 7 },
-      headers: authHeaders,
-    });
-    const report = reportRes?.data || {};
-
-    // 2) send as first message so the model answers strictly from context
-    const text = `PATIENT_CONTEXT\n${JSON.stringify(report)}`;
-    const msg = {
-      type: "conversation.item.create",
-      item: { type: "message", role: "user", content: [{ type: "input_text", text }] },
-    };
-    ch.send(JSON.stringify(msg));
-    ch.send(JSON.stringify({ type: "response.create" }));
-  };
-
   const startSession = async () => {
-    if (!patientId) {
+    const pid = String(patientId || "").trim();
+    if (!pid) {
       setError("Missing patientId");
       return;
     }
@@ -93,8 +77,11 @@ export default function ProviderPatientReport({ patientId, onClose }) {
       setSessionComplete(false);
       setCurrentMessage("");
 
-      // Ephemeral key for provider-report assistant
-      const tokenRes = await healthtrackerapi.get(`/voice-agent/provider-report/token`, { headers: authHeaders });
+      // Request an ephemeral session token that ALREADY includes the patient context
+      const tokenRes = await healthtrackerapi.get(`/voice-agent/provider-report/token`, {
+        headers: authHeaders,
+        params: { patientId: pid },
+      });
       const EPHEMERAL_KEY = tokenRes?.data?.client_secret?.value;
       if (!EPHEMERAL_KEY) throw new Error("Token generation failed");
 
@@ -157,17 +144,16 @@ export default function ProviderPatientReport({ patientId, onClose }) {
         body: offer.sdp,
         headers: { Authorization: `Bearer ${EPHEMERAL_KEY}`, "Content-Type": "application/sdp" },
       });
-      if (!sdpResponse.ok) throw new Error(`SDP exchange failed: ${sdpResponse.status}`);
+      if (!sdpResponse.ok) {
+        const text = await sdpResponse.text().catch(() => "");
+        throw new Error(`SDP exchange failed: ${sdpResponse.status} ${text}`);
+      }
       const answer = { type: "answer", sdp: await sdpResponse.text() };
       await pc.setRemoteDescription(answer);
 
-      // DC events — use the *local* dc reference to avoid state race
-      dc.addEventListener("open", async () => {
-        setIsSessionActive(true);
-        try { await primeContext(dc); } catch (e) { console.error("Prime failed", e); }
-      });
+      dc.addEventListener("open", () => setIsSessionActive(true));
       dc.addEventListener("close", () => { setIsSessionActive(false); cleanupAnalyser(); });
-      dc.addEventListener("error", (e) => { setError(e?.message || "Data channel error"); });
+      dc.addEventListener("error", (e) => setError(e?.message || "Data channel error"));
       dc.addEventListener("message", (e) => {
         try {
           const ev = JSON.parse(e.data);
@@ -178,17 +164,20 @@ export default function ProviderPatientReport({ patientId, onClose }) {
         } catch {}
       });
 
-      toast({ title: "Report agent connected", description: "Ask questions about this patient’s recent symptoms." });
+      toast({ title: "Report agent connected", description: "Ask questions about this patient’s history." });
     } catch (err) {
-      console.error(err);
-      setError(err.message || "Failed to start report session");
+      const msg =
+        err?.response?.data?.error ||
+        err?.response?.data?.message ||
+        err?.message ||
+        "Failed to start report session";
+      setError(msg);
     } finally {
       setIsConnecting(false);
     }
   };
 
   useEffect(() => {
-    // Auto-start on mount
     startSession();
     return () => { stopSession(); };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -203,7 +192,7 @@ export default function ProviderPatientReport({ patientId, onClose }) {
           </div>
           <div>
             <h3 className="text-lg font-semibold">Patient Report (Voice)</h3>
-            <p className="text-xs text-gray-300">Grounded on saved symptoms & conversations (last 7 days).</p>
+            <p className="text-xs text-gray-300">Grounded on full history of symptoms & conversations.</p>
           </div>
         </div>
         <Button variant="ghost" onClick={onClose} className="gap-2">
@@ -229,10 +218,7 @@ export default function ProviderPatientReport({ patientId, onClose }) {
       <div className="flex items-center justify-center my-6">
         <motion.div
           className="relative h-36 w-36 rounded-full"
-          animate={{
-            scale: 1 + level * 0.3,
-            boxShadow: `0 0 ${10 + level * 30}px rgba(34,211,238,0.45), 0 0 ${6 + level * 20}px rgba(16,185,129,0.35)`,
-          }}
+          animate={{ scale: 1 + level * 0.3, boxShadow: `0 0 ${10 + level * 30}px rgba(34,211,238,0.45), 0 0 ${6 + level * 20}px rgba(16,185,129,0.35)` }}
           transition={{ type: "spring", stiffness: 120, damping: 18 }}
         >
           <motion.div

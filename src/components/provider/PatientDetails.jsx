@@ -14,13 +14,30 @@ import {
   User as UserIcon,
   Loader2
 } from 'lucide-react';
-import ProviderPatientReport from '@/components/provider/ProviderPatientReport'; // NEW
+import ProviderPatientReport from '@/components/provider/ProviderPatientReport';
 
 const PatientDetails = ({ patient, onBack, loading }) => {
   const { toast } = useToast();
   const [showReport, setShowReport] = useState(false);
-  const urgency = getUrgencyFromSymptoms(patient.symptoms || []);
-console.log('PatientDetails rendering with patient:', patient);
+  const urgency = getUrgencyFromSymptoms(patient?.symptoms || []);
+
+  // Robustly resolve a 24-char ObjectId string from various shapes
+  const resolvePatientId = (p) => {
+    const val = String(
+      p?._id || p?.id ||
+      p?.result?._id || p?.result?.id ||
+      p?.patient?._id || p?.patient?.id ||
+      ""
+    ).trim();
+    return val;
+  };
+  const pid = resolvePatientId(patient);
+  // (Optional) dev hint if id looks wrong
+  if (process.env.NODE_ENV !== "production" && pid && !/^[a-fA-F0-9]{24}$/.test(pid)) {
+    // eslint-disable-next-line no-console
+    console.warn("[PatientDetails] patientId is not a 24-char ObjectId:", pid);
+  }
+
   if (loading) {
     return (
       <div className="flex justify-center items-center p-8">
@@ -30,9 +47,9 @@ console.log('PatientDetails rendering with patient:', patient);
   }
 
   const symptomTypes = {
-    physical: (patient.symptoms || []).filter(s => s.type === 'physical'),
-    mental: (patient.symptoms || []).filter(s => s.type === 'mental'),
-    emotional: (patient.symptoms || []).filter(s => s.type === 'emotional'),
+    physical: (patient?.symptoms || []).filter(s => s.type === 'physical'),
+    mental: (patient?.symptoms || []).filter(s => s.type === 'mental'),
+    emotional: (patient?.symptoms || []).filter(s => s.type === 'emotional'),
   };
 
   const SymptomCategory = ({ title, icon: Icon, symptoms }) => (
@@ -48,7 +65,7 @@ console.log('PatientDetails rendering with patient:', patient);
         {symptoms.length > 0 ? (
           symptoms.map((symptom, index) => (
             <motion.div
-              key={symptom.id || index}
+              key={symptom.id || symptom._id || index}
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: index * 0.05 }}
@@ -75,8 +92,6 @@ console.log('PatientDetails rendering with patient:', patient);
     </Card>
   );
 
-  const pid = patient.result._id || patient.result.id;
-
   return (
     <motion.div initial={{ opacity: 0, x: 50 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: -50 }}>
       <div className="flex items-center justify-between mb-6">
@@ -84,8 +99,16 @@ console.log('PatientDetails rendering with patient:', patient);
           <ArrowLeft className="w-4 h-4 mr-2" />
           Back to Patient List
         </Button>
-        <Button onClick={() => setShowReport(true)} className="bg-teal-500 hover:bg-teal-600">
-          {/* CHANGED: label + action */}
+        <Button
+          onClick={() => {
+            if (!pid) {
+              toast({ variant: "destructive", title: "Missing patient id", description: "Cannot open the report without a patient id." });
+              return;
+            }
+            setShowReport(true);
+          }}
+          className="bg-teal-500 hover:bg-teal-600"
+        >
           Get Report
         </Button>
       </div>
@@ -97,7 +120,7 @@ console.log('PatientDetails rendering with patient:', patient);
               <UserIcon className="w-8 h-8 text-teal-600" />
             </div>
             <div>
-              <CardTitle className="text-3xl">{patient.name}</CardTitle>
+              <CardTitle className="text-3xl">{patient?.name || patient?.fullName || "Patient"}</CardTitle>
               <CardDescription className="flex items-center gap-2 mt-1">
                 Urgency: <span className={`font-bold ${urgency.color}`}>{urgency.level}</span>
               </CardDescription>

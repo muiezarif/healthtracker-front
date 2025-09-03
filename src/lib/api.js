@@ -1,5 +1,5 @@
-// const API_URL = 'http://localhost:8800/api';
-const API_URL = 'https://healthtrackerapp.novam.us/api';
+const API_URL = 'http://localhost:8800/api';
+// const API_URL = 'https://healthtrackerapp.novam.us/api';
 
 const handleResponse = async (response) => {
   if (!response.ok) {
