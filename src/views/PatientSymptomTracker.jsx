@@ -18,7 +18,7 @@ import AssistantTab from '../components/AssistantTab';
 const PatientSymptomTracker = () => {
   const { user, token } = useAuth();
   const { toast } = useToast();
-  const [activeTab, setActiveTab] = useState('record');
+  const [activeTab, setActiveTab] = useState('assistant');
   const [symptoms, setSymptoms] = useState([]);
   const [loading, setLoading] = useState(true);
 
@@ -80,14 +80,14 @@ const PatientSymptomTracker = () => {
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'record':
-        return <RecordTab addSymptom={addSymptom} />;
       case 'assistant':
         return <AssistantTab addSymptom={addSymptom} />;
+      case 'record':
+        return <RecordTab addSymptom={addSymptom} />; 
       case 'history':
         return <HistoryTab symptoms={symptoms} />;
-      case 'providers':
-        return <ProvidersTab />;
+      // case 'providers':
+      //   return <ProvidersTab />;
       case 'insights':
         return <InsightsTab />;
       default:
@@ -193,8 +193,8 @@ const PatientSymptomTracker = () => {
           <div className="grid grid-cols-4">
             <button
               role="tab"
-              aria-selected={activeTab === 'record'}
-              onClick={() => setActiveTab('record')}
+              aria-selected={activeTab === 'assistant'}
+              onClick={() => setActiveTab('assistant')}
               className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'record' ? 'text-emerald-400' : 'text-gray-300'}`}
             >
               <Stethoscope className="w-5 h-5 mb-1" />
@@ -202,13 +202,14 @@ const PatientSymptomTracker = () => {
             </button>
             <button
               role="tab"
-              aria-selected={activeTab === 'assistant'}
-              onClick={() => setActiveTab('assistant')}
+              aria-selected={activeTab === 'record'}
+              onClick={() => setActiveTab('record')}
               className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'record' ? 'text-emerald-400' : 'text-gray-300'}`}
             >
               <Stethoscope className="w-5 h-5 mb-1" />
-              Assistant
+              Write
             </button>
+            
             <button
               role="tab"
               aria-selected={activeTab === 'history'}
@@ -218,7 +219,7 @@ const PatientSymptomTracker = () => {
               <History className="w-5 h-5 mb-1" />
               History
             </button>
-            <button
+            {/* <button
               role="tab"
               aria-selected={activeTab === 'providers'}
               onClick={() => setActiveTab('providers')}
@@ -226,7 +227,7 @@ const PatientSymptomTracker = () => {
             >
               <Users className="w-5 h-5 mb-1" />
               Providers
-            </button>
+            </button> */}
             <button
               role="tab"
               aria-selected={activeTab === 'insights'}

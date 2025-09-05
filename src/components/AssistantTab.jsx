@@ -409,7 +409,7 @@ export default function AssistantTab() {
             </p>
           </div>
         </div>
-        <Button variant="outline" className="gap-2" onClick={resetPanel}>
+        <Button variant="bg-black outline" className="gap-2" onClick={resetPanel}>
           <RefreshCw className="w-4 h-4" /> Reset
         </Button>
       </motion.div>
