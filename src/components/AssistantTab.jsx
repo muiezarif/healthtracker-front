@@ -14,6 +14,8 @@ import {
   CheckCircle,
   Loader2,
   RefreshCw,
+  Clipboard,
+  Check as CheckIcon,
 } from "lucide-react";
 
 /** -------- helpers (unchanged from RecordTab VoiceAgent) -------- */
@@ -42,6 +44,84 @@ const wordsToSeverity = (val) => {
   return undefined;
 };
 
+/** Extract chat messages from Realtime events into [{role,text}] */
+const extractMessagesFromEvents = (events) =>
+  (events || [])
+    .map((ev) => {
+      if (ev.type === "conversation.item.input_audio_transcription.completed" && ev.transcript) {
+        return { role: "patient", text: String(ev.transcript).trim() };
+      }
+      if (ev.type === "conversation.item.created" && ev.item?.role === "assistant" && ev.item?.content?.[0]?.text) {
+        return { role: "assistant", text: String(ev.item.content[0].text).trim() };
+      }
+      if (ev.type === "response.audio_transcript.done" && ev.transcript) {
+        return { role: "assistant", text: String(ev.transcript).trim() };
+      }
+      if (ev.type === "conversation.item.create" && (ev.item?.role === "user" || ev.item?.role === "patient") && ev.item?.content?.[0]?.text) {
+        return { role: "patient", text: String(ev.item.content[0].text).trim() };
+      }
+      return null;
+    })
+    .filter(Boolean);
+
+/** Build a lightweight summary object from messages */
+const buildConversationSummary = (messages) => {
+  const patientMsgs = messages.filter((m) => m.role === "patient").map((m) => m.text);
+  const assistantMsgs = messages.filter((m) => m.role === "assistant").map((m) => m.text);
+
+  // Severity stats
+  const severities = patientMsgs
+    .map((t) => wordsToSeverity(t))
+    .filter((n) => typeof n === "number");
+  const peak = severities.length ? Math.max(...severities) : null;
+  const avg = severities.length ? +(severities.reduce((a, b) => a + b, 0) / severities.length).toFixed(2) : null;
+
+  // Key patient statements (first sentence of last 3 distinct utterances)
+  const seen = new Set();
+  const keyPatient = [];
+  for (let i = patientMsgs.length - 1; i >= 0 && keyPatient.length < 3; i--) {
+    const txt = patientMsgs[i];
+    const firstSentence = txt.split(/(?<=[.!?])\s+/)[0].slice(0, 220);
+    const key = firstSentence.toLowerCase();
+    if (!seen.has(key) && firstSentence.length > 3) {
+      seen.add(key);
+      keyPatient.unshift(firstSentence);
+    }
+  }
+
+  // Notable phrases
+  const notable = [];
+  const re = /\b(since|because|trigger|worse|better|improved|flare|started|yesterday|today|week|month|year)\b/i;
+  for (let i = patientMsgs.length - 1; i >= 0 && notable.length < 3; i--) {
+    const txt = patientMsgs[i];
+    if (re.test(txt)) {
+      const sent = txt.split(/(?<=[.!?])\s+/).find((s) => re.test(s)) || txt;
+      notable.unshift(sent.slice(0, 220));
+    }
+  }
+
+  const overview =
+    `Turn count: ${messages.length} (Patient ${patientMsgs.length} / Assistant ${assistantMsgs.length})` +
+    (peak != null ? ` · Peak severity ${peak}/10` : "") +
+    (avg != null ? ` · Avg severity ${avg}/10` : "");
+
+  return {
+    overview,
+    bullets: [
+      ...(keyPatient.length ? [{ label: "Key patient statements", items: keyPatient }] : []),
+      ...(severities.length ? [{ label: "Severity signals", items: [`Peak ${peak}/10`, `Average ${avg}/10`].filter(Boolean) }] : []),
+      ...(notable.length ? [{ label: "Notable mentions", items: notable }] : []),
+    ],
+    plainText: [
+      "Session Summary",
+      overview,
+      keyPatient.length ? "\nKey patient statements:\n- " + keyPatient.join("\n- ") : "",
+      severities.length ? "\nSeverity signals:\n- " + [`Peak ${peak}/10`, `Average ${avg}/10`].filter(Boolean).join("\n- ") : "",
+      notable.length ? "\nNotable mentions:\n- " + notable.join("\n- ") : "",
+    ].filter(Boolean).join("\n"),
+  };
+};
+
 /** -------- Voice Assistant panel -------- */
 export default function AssistantTab() {
   const { token } = useAuth();
@@ -67,7 +147,7 @@ export default function AssistantTab() {
   const [sessionComplete, setSessionComplete] = useState(false);
   const [error, setError] = useState("");
 
-  // conversation events (used for saving)
+  // conversation events (used for saving & summary)
   const [events, setEvents] = useState([]);
   const [rateLimitedUntil, setRateLimitedUntil] = useState(0);
   const RATE_LIMIT_COOLDOWN_MS = 15000;
@@ -75,6 +155,10 @@ export default function AssistantTab() {
   // light parsing (kept for parity with RecordTab)
   const [lastTranscript, setLastTranscript] = useState("");
   const [parsedSeverity, setParsedSeverity] = useState(null);
+
+  // summary
+  const [sessionSummary, setSessionSummary] = useState(null);
+  const [copied, setCopied] = useState(false);
 
   // save guard to avoid double-saves on multiple end triggers
   const hasSavedRef = useRef(false);
@@ -86,26 +170,8 @@ export default function AssistantTab() {
   /** ---------- conversation save ---------- */
   const saveConversation = async ({ reason = "complete" } = {}) => {
     try {
-      const filteredMessages = events
-        .map(ev => {
-          if (ev.type === "conversation.item.input_audio_transcription.completed" && ev.transcript) {
-            return { role: "patient", text: ev.transcript.trim() };
-          }
-          if (ev.type === "conversation.item.created" && ev.item?.role === "assistant" && ev.item?.content?.[0]?.text) {
-            return { role: "assistant", text: ev.item.content[0].text.trim() };
-          }
-          if (ev.type === "response.audio_transcript.done" && ev.transcript) {
-            return { role: "assistant", text: ev.transcript.trim() };
-          }
-          if (ev.type === "conversation.item.create" && (ev.item?.role === "user" || ev.item?.role === "patient") && ev.item?.content?.[0]?.text) {
-            return { role: "patient", text: ev.item.content[0].text.trim() };
-          }
-          return null;
-        })
-        .filter(Boolean);
-
+      const filteredMessages = extractMessagesFromEvents(events);
       if (!filteredMessages.length) return;
-
       const payload = { messages: filteredMessages, reason };
       await healthtrackerapi.post("/conversations", payload, {
         headers: { Authorization: `Bearer ${token}` },
@@ -115,10 +181,24 @@ export default function AssistantTab() {
     }
   };
 
+  /** Build & set session summary (client-side) */
+  const generateAndSetSummary = () => {
+    const filteredMessages = extractMessagesFromEvents(events);
+    if (!filteredMessages.length) return;
+    const summary = buildConversationSummary(filteredMessages);
+    setSessionSummary(summary);
+  };
+
   const autoSaveOnEnd = async (reason = "auto-end") => {
     if (hasSavedRef.current) return;
     hasSavedRef.current = true;
+
+    // 1) Generate summary for display
+    generateAndSetSummary();
+
+    // 2) Persist full conversation (unchanged)
     await saveConversation({ reason });
+
     setSessionComplete(true);
     toast({ title: "✅ Session saved", description: "Your conversation has been saved." });
   };
@@ -159,7 +239,7 @@ export default function AssistantTab() {
     cleanupAudioAnalyser();
     setIsSessionActive(false);
 
-    // auto-save on end
+    // auto-save on end + summary
     await autoSaveOnEnd("ended-by-user");
   };
 
@@ -174,6 +254,8 @@ export default function AssistantTab() {
       setRateLimitedUntil(0);
       setLastTranscript("");
       setParsedSeverity(null);
+      setSessionSummary(null);
+      setCopied(false);
       hasSavedRef.current = false;
 
       // 1) ephemeral key from your backend
@@ -190,7 +272,6 @@ export default function AssistantTab() {
       // receive assistant audio
       pc.addTransceiver("audio", { direction: "sendrecv" });
       pc.ontrack = (e) => {
-        // hook element
         if (audioElement.current) {
           audioElement.current.srcObject = e.streams[0];
           audioElement.current.muted = false;
@@ -355,6 +436,8 @@ export default function AssistantTab() {
     const onOpen = () => {
       setIsSessionActive(true);
       setEvents([]);
+      setSessionSummary(null);
+      setCopied(false);
       setTimeout(() => {
         sendTextMessage("Hello, I'm ready to talk. Please help me get started.");
       }, 600);
@@ -363,7 +446,7 @@ export default function AssistantTab() {
     const onClose = async () => {
       setIsSessionActive(false);
       cleanupAudioAnalyser();
-      await autoSaveOnEnd("channel-closed");
+      await autoSaveOnEnd("channel-closed"); // will also generate & set summary
     };
     const onError = (err) => setError(err?.message || "Communication error occurred");
 
@@ -387,7 +470,19 @@ export default function AssistantTab() {
     setCurrentMessage("");
     setLastTranscript("");
     setParsedSeverity(null);
+    setSessionSummary(null);
+    setCopied(false);
     cleanupAudioAnalyser();
+  };
+
+  const copySummary = async () => {
+    try {
+      await navigator.clipboard.writeText(sessionSummary?.plainText || "");
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch (e) {
+      toast({ variant: "destructive", title: "Copy failed", description: e?.message || "Could not copy summary." });
+    }
   };
 
   /** ---------- UI ---------- */
@@ -505,6 +600,34 @@ export default function AssistantTab() {
           </div>
         )}
       </Card>
+
+      {/* ===== Session Summary (shows after session ends) ===== */}
+      {sessionComplete && sessionSummary && (
+        <Card className="mt-4 bg-white/5 border-white/20 p-5 sm:p-6">
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-semibold text-white">Session Summary</h3>
+            <Button onClick={copySummary} variant="outline" className="gap-2">
+              {copied ? <CheckIcon className="w-4 h-4" /> : <Clipboard className="w-4 h-4" />}
+              {copied ? "Copied" : "Copy"}
+            </Button>
+          </div>
+
+          <p className="text-sm text-slate-200 mb-3">{sessionSummary.overview}</p>
+
+          <div className="space-y-4">
+            {sessionSummary.bullets.map((group, idx) => (
+              <div key={idx}>
+                <p className="text-sm font-medium text-slate-300 mb-1">{group.label}</p>
+                <ul className="list-disc pl-6 text-slate-100 text-sm space-y-1">
+                  {group.items.map((it, i) => (
+                    <li key={i}>{it}</li>
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
