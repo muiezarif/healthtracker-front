@@ -19,7 +19,9 @@ const PatientSymptomTracker = () => {
   const { user, token } = useAuth();
   const { toast } = useToast();
   const [activeTab, setActiveTab] = useState('assistant');
+
   const [symptoms, setSymptoms] = useState([]);
+  const [conversations, setConversations] = useState([]); // <-- NEW
   const [loading, setLoading] = useState(true);
 
   const fetchSymptoms = useCallback(async () => {
@@ -29,21 +31,51 @@ const PatientSymptomTracker = () => {
     }
     setLoading(true);
     try {
-      const symptomsData = await patientGetSymptomsHistory(token);
-      const formattedSymptoms = symptomsData.result.map(s => {
+      const data = await patientGetSymptomsHistory(token);
+      const result = data?.result || {};
+      const symptomDocs = result.symptoms || result || []; // backward-compat
+      const convoDocs = result.conversations || [];
+
+      const formattedSymptoms = (symptomDocs || []).map(s => {
         const date = new Date(s.createdAt);
         return {
+          _id: s._id,
           id: s._id,
           type: s.symptom_type,
+          symptom: s.symptom,
           description: s.description,
-          severity: s.severity_level || 5,
+          severity: s.severity_level ?? 5,
           notes: s.additional_notes || '',
           timestamp: s.createdAt,
           date: date.toLocaleDateString(),
           time: date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-        }
+        };
       });
+
+      const formattedConversations = (convoDocs || []).map(c => {
+        const ts = new Date(c.updatedAt || c.createdAt);
+        const msgs = Array.isArray(c.messages) ? c.messages : [];
+        // grab latest patient + assistant lines for a quick preview
+        let lastPatient = null, lastAssistant = null;
+        for (let i = msgs.length - 1; i >= 0 && (!lastPatient || !lastAssistant); i--) {
+          if (!lastAssistant && msgs[i].role === 'assistant') lastAssistant = msgs[i].text;
+          if (!lastPatient && msgs[i].role === 'patient') lastPatient = msgs[i].text;
+        }
+        return {
+          _id: c._id,
+          id: c._id,
+          messages: msgs,
+          messagesCount: msgs.length,
+          lastPatient,
+          lastAssistant,
+          timestamp: ts.toISOString(),
+          date: ts.toLocaleDateString(),
+          time: ts.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        };
+      });
+
       setSymptoms(formattedSymptoms);
+      setConversations(formattedConversations);
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error fetching history', description: error.message });
     } finally {
@@ -67,12 +99,12 @@ const PatientSymptomTracker = () => {
       description: newSymptom.description,
       severity_level: newSymptom.severity,
       additional_notes: newSymptom.notes,
-    }
+    };
 
     try {
       await patientAddSymptom(token, payload);
       toast({ title: 'Symptom submitted successfully!' });
-      fetchSymptoms(); // Refresh the list
+      fetchSymptoms(); // Refresh the list (symptoms + conversations)
     } catch (error) {
       toast({ variant: 'destructive', title: 'Error submitting symptom', description: error.message });
     }
@@ -85,7 +117,7 @@ const PatientSymptomTracker = () => {
       case 'record':
         return <RecordTab addSymptom={addSymptom} />; 
       case 'history':
-        return <HistoryTab symptoms={symptoms} />;
+        return <HistoryTab symptoms={symptoms} conversations={conversations} />; // <-- pass both
       // case 'providers':
       //   return <ProvidersTab />;
       case 'insights':
@@ -100,12 +132,10 @@ const PatientSymptomTracker = () => {
       <Helmet>
         <title>Symptom Tracker - HealthTracker</title>
         <meta name="description" content="Monitor your health journey with voice-enabled symptom tracking." />
-        {/* Make sure we render responsively on phones */}
         <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
         <body className="bg-gradient-to-br from-gray-900 to-slate-800" />
       </Helmet>
 
-      {/* Sticky top app bar on mobile */}
       <header className="sm:hidden sticky top-0 z-50 bg-black/30 backdrop-blur border-b border-white/10">
         <div className="px-4 h-14 flex items-center gap-3">
           <Button asChild variant="ghost" size="sm" className="text-gray-200 hover:text-white">
@@ -121,7 +151,6 @@ const PatientSymptomTracker = () => {
       </header>
 
       <div className="min-h-screen text-white px-4 sm:px-6 lg:px-8 pt-4 sm:pt-6 lg:pt-8 pb-28 sm:pb-10 relative">
-        {/* Desktop back button (kept out of flow on large screens) */}
         <div className="hidden sm:block absolute top-6 left-6">
           <Button asChild variant="ghost" className="text-gray-300 hover:text-white hover:bg-white/10">
             <Link to="/patient">
@@ -132,7 +161,6 @@ const PatientSymptomTracker = () => {
         </div>
 
         <main className="max-w-3xl mx-auto w-full">
-          {/* Hero header (responsive sizes) */}
           <motion.div
             initial={{ opacity: 0, y: -12 }}
             animate={{ opacity: 1, y: 0 }}
@@ -151,12 +179,10 @@ const PatientSymptomTracker = () => {
             </p>
           </motion.div>
 
-          {/* Desktop/Tablet navigation */}
           <div className="hidden sm:block">
             <Navigation activeTab={activeTab} setActiveTab={setActiveTab} />
           </div>
 
-          {/* Content area */}
           <AnimatePresence mode="wait">
             {loading ? (
               <motion.div
@@ -168,7 +194,7 @@ const PatientSymptomTracker = () => {
               >
                 <div className="flex items-center gap-3 text-gray-300">
                   <Loader2 className="w-5 h-5 animate-spin" />
-                  <span>Loading your symptoms…</span>
+                  <span>Loading your history…</span>
                 </div>
               </motion.div>
             ) : (
@@ -195,7 +221,7 @@ const PatientSymptomTracker = () => {
               role="tab"
               aria-selected={activeTab === 'assistant'}
               onClick={() => setActiveTab('assistant')}
-              className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'record' ? 'text-emerald-400' : 'text-gray-300'}`}
+              className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'assistant' ? 'text-emerald-400' : 'text-gray-300'}`}
             >
               <Stethoscope className="w-5 h-5 mb-1" />
               Record
@@ -209,7 +235,6 @@ const PatientSymptomTracker = () => {
               <Stethoscope className="w-5 h-5 mb-1" />
               Write
             </button>
-            
             <button
               role="tab"
               aria-selected={activeTab === 'history'}
@@ -219,15 +244,6 @@ const PatientSymptomTracker = () => {
               <History className="w-5 h-5 mb-1" />
               History
             </button>
-            {/* <button
-              role="tab"
-              aria-selected={activeTab === 'providers'}
-              onClick={() => setActiveTab('providers')}
-              className={`flex flex-col items-center justify-center py-2 text-xs ${activeTab === 'providers' ? 'text-emerald-400' : 'text-gray-300'}`}
-            >
-              <Users className="w-5 h-5 mb-1" />
-              Providers
-            </button> */}
             <button
               role="tab"
               aria-selected={activeTab === 'insights'}
@@ -238,7 +254,6 @@ const PatientSymptomTracker = () => {
               Insights
             </button>
           </div>
-          {/* Safe-area spacer for iOS */}
           <div className="h-3" />
         </nav>
       </div>

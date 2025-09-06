@@ -439,7 +439,7 @@ export default function AssistantTab() {
       setSessionSummary(null);
       setCopied(false);
       setTimeout(() => {
-        sendTextMessage("Hello, I'm ready to talk. Please help me get started.");
+        sendTextMessage("Hello, Patient is here greet him.");
       }, 600);
     };
 
